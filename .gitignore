@@ -8,3 +8,6 @@ output/
 .venv/
 submit.ipynb
 aztool/
+
+*.egg-info/
+slurm_logs/

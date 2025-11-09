@@ -64,6 +64,8 @@ cd dion
 pip install -e .[train]
 ```
 
+(Noah: create a folder `/vast/nia4240/fineweb10B`. Then create a symbolic link from `~/dion/data/fineweb10b` to `/vast/nia4240/fineweb10B`.)
+
 Download pretokenized FineWeb dataset:
 ```bash
 python data/cached_fineweb10B.py 30
