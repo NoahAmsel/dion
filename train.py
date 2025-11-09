@@ -71,6 +71,7 @@ class Hyperparameters:
     replicate_mesh_grad_sync: bool = False
     mixed_precision: bool = False
     adjust_lr: str = "spectral_norm"  # for Muon only
+    random_cols: bool = False  # for Fron only
 
 
 # Helper function to only print on global rank 0
@@ -135,6 +136,9 @@ def parse_cli_args():
     )
     parser.add_argument(
         "--mixed_precision", action="store_true", help="Use mixed precision for Dion"
+    )
+    parser.add_argument(
+        "--random_cols", type=bool, default=False, help="Select random columns for Fron"
     )
 
     # ---------- model ----------
@@ -448,6 +452,7 @@ def init_optimizer(
             weight_decay=hp.weight_decay, 
             adjust_lr=hp.adjust_lr, 
             use_triton=(not cli_args.no_triton),
+            random_cols=hp.random_cols,
         ) 
 
     elif hp.optimizer == "dion_simple":

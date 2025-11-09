@@ -74,6 +74,7 @@ class Fron(Optimizer):
         flatten: bool = False,
         use_triton: bool = False,
         newton_schulz_func: Optional[Callable] = None,
+        random_cols: bool = False,
     ):
         # Chenk hyperparameter
         if lr < 0.0:
@@ -140,6 +141,8 @@ class Fron(Optimizer):
             self._newton_schulz_func = newton_schulz_triton
         else:
             self._newton_schulz_func = zeropower_via_newtonschulz5
+
+        self._random_cols = random_cols
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -263,6 +266,7 @@ class Fron(Optimizer):
                 world_size=self._world_size,
                 process_group=self._process_group,
                 newton_schulz_func=self._newton_schulz_func,
+                random_cols=self._random_cols,
             )
 
             # Create batches of parameters of size self._world_size
@@ -463,6 +467,7 @@ def fron_update_local_async(
     flatten: bool,
     adjust_lr: Optional[str],
     newton_schulz_func: Optional[Callable] = None,
+    random_cols: bool = False,
 ) -> Generator[None, None, None]:
     assert len(X) == len(G) == 1
     x = X[0]
@@ -482,7 +487,8 @@ def fron_update_local_async(
     M.add_(g.to(dtype=M.dtype))
     O_local = fractional_orthonormalize_update(
         M_full=M, fraction=float(fraction), ef_decay=ef_decay,
-        flatten=flatten, epsilon=epsilon, newton_schulz_func=newton_schulz_func
+        flatten=flatten, epsilon=epsilon, newton_schulz_func=newton_schulz_func,
+        random_cols=random_cols
     )
 
     # Apply update locally 
@@ -511,6 +517,7 @@ def fron_update_batch_async(
     shard_dim: Optional[int] = None,
     process_group: Optional[ProcessGroup] = None,
     newton_schulz_func: Optional[Callable] = None,
+    random_cols: bool = False,
 ) -> Generator[None, None, None]:
     """
     FRON layer-sharded path:
@@ -580,7 +587,8 @@ def fron_update_batch_async(
 
             O_full = fractional_orthonormalize_update(
                 M_full=M_full, fraction=frac, ef_decay=ef_decay,
-                flatten=flatten, epsilon=epsilon, newton_schulz_func=newton_schulz_func
+                flatten=flatten, epsilon=epsilon, newton_schulz_func=newton_schulz_func,
+                random_cols=random_cols
             )
             send_shards = [t.contiguous().to(torch.bfloat16)
                         for t in torch.tensor_split(O_full, world_size, dim=shard_dim)]
@@ -617,7 +625,8 @@ def fron_update_batch_async(
 
             O_full = fractional_orthonormalize_update(
                 M_full=M_full, fraction=frac, ef_decay=ef_decay,
-                flatten=flatten, epsilon=epsilon, newton_schulz_func=newton_schulz_func
+                flatten=flatten, epsilon=epsilon, newton_schulz_func=newton_schulz_func,
+                random_cols=random_cols
             )
 
             if process_group is not None and world_size > 1:
@@ -654,7 +663,8 @@ def make_work_view(M: Tensor) -> Tuple[Tensor, bool]:
 
 def fractional_orthonormalize_update(
     M_full: Tensor, fraction: float, ef_decay: Tensor,
-    flatten: bool, epsilon: Tensor, newton_schulz_func: Callable
+    flatten: bool, epsilon: Tensor, newton_schulz_func: Callable,
+    random_cols: bool
 ) -> Tensor:
     M_work, transposed = make_work_view(M_full)
     I, J = M_work.size(-2), M_work.size(-1)
@@ -665,7 +675,8 @@ def fractional_orthonormalize_update(
         k = int(math.ceil(fraction * J))
         ortho_update = topk_and_orthonormalize(
             M_work, ef_decay=ef_decay, k=k,
-            flatten=flatten, epsilon=epsilon, newton_schulz_func=newton_schulz_func
+            flatten=flatten, epsilon=epsilon, newton_schulz_func=newton_schulz_func,
+            random_cols=random_cols
         )
     return ortho_update.mT.contiguous() if transposed else ortho_update
  
@@ -676,13 +687,18 @@ def topk_and_orthonormalize(
     k: int,
     flatten: bool,
     epsilon: Tensor,
-    newton_schulz_func,   
+    newton_schulz_func,
+    random_cols: bool,   
 ) -> Tensor:
     """ 
     """
     # Compute once
-    alpha = M_work.abs().sum(dim=-2)       # [J]
-    K = torch.topk(alpha, k, sorted=False).indices  # [k]
+    if random_cols:
+        J = M_work.size(-1)
+        K = torch.randperm(J, device=M_work.device)[:k]
+    else:
+        alpha = M_work.abs().sum(dim=-2)       # [J]
+        K = torch.topk(alpha, k, sorted=False).indices  # [k]
     # Select and orthonormalize
     M_sel = torch.index_select(M_work, dim=-1, index=K)   # [I, k]
     O_sel = muon_update_newton_schulz(M_sel, newton_schulz_func,

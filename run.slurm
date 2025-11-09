@@ -38,7 +38,7 @@ source /ext3/env.sh
 source /ext3/slurm/env.sh
 conda activate dion
 cd ~/dion
-torchrun --standalone --nproc_per_node=1 train.py --config configs/dion_160m.yaml
+torchrun --standalone --nproc_per_node=1 train.py --config configs/fron_160m.yaml --random_cols=true
 "
 
 # # Run distributed training with torchrun (4 processes / GPUs on the node)

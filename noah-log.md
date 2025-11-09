@@ -8,3 +8,6 @@
     - https://wandb.ai/noahamselsteam/dion-debug/runs/iiqsjcy3
     - it's not going much faster. still 4+ hrs
     - answer: we're always doing 3000 iters regardless of thteir size?? but that doesn't make sense because I confirmed that the number of gradient accumulation steps went down by a factor of 4
+- Did a run with muon and one fron run with a lower rank of 1/8
+- doing a run of fron with rank 1/8 and randomly selected cols
+    - https://wandb.ai/noahamselsteam/dion-debug/runs/h2nphmjg
