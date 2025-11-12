@@ -1,7 +1,7 @@
 
 # — Model —
 model_dim: 768
-n_layer: 13
+n_layer: 12
 n_head: 6
 sequence_length: 1024
 
@@ -43,4 +43,5 @@ rank_fraction: 0.125
 scalar_opt: lion
 adjust_lr: spectral_norm
 lr: 0.02
+
 random_cols: false
