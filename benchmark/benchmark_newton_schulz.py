@@ -21,6 +21,7 @@ import torch
 import triton.testing as tt
 
 from dion.newton_schulz_triton import (
+    newton_schulz_appendixF_triton,
     newton_schulz_triton,
     zeropower_via_newtonschulz5,
 )
@@ -101,7 +102,7 @@ def bench_grid(
     print("Theoretical max:", f"{(4*expansion+2)/(3*expansion+1):4.2f}x")
 
 
-def bench_plot(batch_size: int, *, out_dir: Path = Path("plots")):
+def bench_plot(batch_size: int, expansion: int, *, out_dir: Path = Path("plots")):
     """Generate TFLOPS vs. size curves using Triton's perf_report helper."""
     if tt is None:
         raise RuntimeError("Triton not available - cannot build plots")
@@ -109,21 +110,26 @@ def bench_plot(batch_size: int, *, out_dir: Path = Path("plots")):
     @tt.perf_report(
         tt.Benchmark(
             x_names=["dim"],
-            x_vals=[128 * i for i in range(1, 8)],
+            x_vals=[512, 1024, 2048, 4096, 8192],
             line_arg="provider",
-            line_vals=["torch", "triton"],
-            line_names=["torch", "triton"],
-            ylabel="TFLOPS",
-            plot_name=f"newton_schulz_batch{batch_size}",
-            args={"batch_size": batch_size},
+            line_vals=["torch", "triton", "appendixF"],
+            line_names=["torch", "triton", "appendixF"],
+            ylabel="TFLOPS (or equivalent)",
+            plot_name=f"newton_schulz_batch{batch_size}_expansion{expansion}",
+            args={"batch_size": batch_size, "expansion": expansion},
+            x_log=True,
         )
     )
-    def bench(dim: int, provider: str, batch_size: int):
-        G = torch.randn(batch_size, dim, dim, dtype=torch.bfloat16, device="cuda")
+    def bench(dim: int, provider: str, batch_size: int, expansion: int = 1):
+        G = torch.randn(batch_size, dim, dim * expansion, dtype=torch.bfloat16, device="cuda")
         if provider == "torch":
             ms = tt.do_bench(lambda: zeropower_via_newtonschulz5(G))
-        else:  # "triton"
+        elif provider == "triton":
             ms = tt.do_bench(lambda: newton_schulz_triton(G))
+        elif provider == "appendixF":
+            ms = tt.do_bench(lambda: newton_schulz_appendixF_triton(G))
+        else:  # "triton"
+            raise ValueError(f"Unknown provider: {provider}")
         return tflops(ms, gemm_cost(dim, dim), steps=5, batch=batch_size)
 
     bench.run(print_data=True, save_path=str(out_dir))
@@ -178,7 +184,7 @@ def main():
             dtype=dtype,
         )
     elif args.plot:
-        bench_plot(args.batch_size)
+        bench_plot(batch_size=args.batch_size, expansion=args.expansion)
     else:  # single run
         m = args.m
         n = args.n or m

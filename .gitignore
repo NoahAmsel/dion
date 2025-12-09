@@ -11,3 +11,4 @@ aztool/
 
 *.egg-info/
 slurm_logs/
+plots/
