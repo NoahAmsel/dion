@@ -5,14 +5,14 @@ Newton-Schulz kernel benchmarks.
 Examples
 --------
 # One-off timing (1024 x 1024, batch=1 & 4)
-python -m benchmarks.bench_newton_schulz --m 1024 --n 1024
-python -m benchmarks.bench_newton_schulz --m 1024 --n 1024 --batch_size 4
+python -m benchmark.benchmark_newton_schulz --m 1024 --n 1024
+python -m benchmark.benchmark_newton_schulz --m 1024 --n 1024 --batch_size 4
 
 # Grid sweep like the original 'benchmark_many_sizes'
-python -m benchmarks.bench_newton_schulz --grid --batch_size 4 --expansion 1
+python -m benchmark.benchmark_newton_schulz --grid --batch_size 4 --expansion 1
 
 # TFLOPS plot (writes PNG & PDF in ./plots)
-python -m benchmarks.bench_newton_schulz --plot --batch_size 1
+python -m benchmark.benchmark_newton_schulz --plot --batch_size 1
 """
 import argparse
 from pathlib import Path
