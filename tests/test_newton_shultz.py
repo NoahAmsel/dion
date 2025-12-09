@@ -7,6 +7,7 @@ from dion.newton_schulz_triton import (
     ns_line_2,
     newton_schulz_triton,
     zeropower_via_newtonschulz5,
+    newton_schulz_appendixF_triton,
 )
 
 # -----------------------------------------------------------------------------#
@@ -77,4 +78,17 @@ def test_newton_schulz_triton(m: int, n: int, dtype: torch.dtype):
     G_batched = torch.randn(4, m, n, dtype=dtype, device="cuda")
     _assert_close(
         newton_schulz_triton(G_batched), zeropower_via_newtonschulz5(G_batched)
+    )
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA device required")
+@pytest.mark.parametrize("m,n", [(256, 256), (256, 1024)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_appendixF(m: int, n: int, dtype: torch.dtype):
+    """Fast Triton + Appendix F implementation should match the reference Newton-Schulz."""
+    G = torch.randn(m, n, dtype=dtype, device="cuda")
+    _assert_close(newton_schulz_appendixF_triton(G), zeropower_via_newtonschulz5(G))
+
+    G_batched = torch.randn(4, m, n, dtype=dtype, device="cuda")
+    _assert_close(
+        newton_schulz_appendixF_triton(G_batched), zeropower_via_newtonschulz5(G_batched)
     )
