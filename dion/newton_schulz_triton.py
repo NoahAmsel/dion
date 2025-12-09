@@ -405,12 +405,10 @@ def newton_schulz_appendixF_triton(G: Tensor, epsilon: float = 1e-7):
 
     ns_line_3 = torch.baddbmm if X.ndim > 2 else torch.addmm
 
-    I = torch.eye(X.size(-2), X.size(-2), device=X.device, dtype=X.dtype)
-
     a0, b0, c0 = ns_consts[0]
     ns_line_1(X, out=Y)  # Y = X @ X.mT
     ns_line_2(Y, alpha=c0, beta=b0, out=Q)  # Q = b0 * Y + c0 * Y @ Y
-    Q += a0*I  # TODO: fix this, perhaps as below?
+    Q += a0*torch.eye(X.size(-2), X.size(-2), device=X.device, dtype=X.dtype)  # TODO: fix this, perhaps as below?
     # Q.diagonal(dim1=-2, dim2=-1).add_(a0)  # Q += a0*I
 
     # Perform the NS iterations
@@ -425,3 +423,11 @@ def newton_schulz_appendixF_triton(G: Tensor, epsilon: float = 1e-7):
     if G.size(-2) > G.size(-1):
         X = X.mT
     return X
+
+
+@torch.compile(dynamic=False, fullgraph=True)
+def newton_schulz_triton_adaptive(G: Tensor, epsilon: float = 1e-7):
+    if max(G.shape[-2:]) > 2 * min(G.shape[-2:]):
+        return newton_schulz_appendixF_triton(G, epsilon=epsilon)
+    else:
+        return newton_schulz_triton(G, epsilon=epsilon)

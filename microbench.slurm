@@ -15,4 +15,9 @@
 mkdir -p slurm_logs
 
 python -m benchmark.benchmark_newton_schulz --batch_size 1 --expansion 1 --plot
+python -m benchmark.benchmark_newton_schulz --batch_size 1 --expansion 2 --plot
+python -m benchmark.benchmark_newton_schulz --batch_size 1 --expansion 3 --plot
 python -m benchmark.benchmark_newton_schulz --batch_size 1 --expansion 4 --plot
+python -m benchmark.benchmark_newton_schulz --batch_size 1 --expansion 8 --plot
+python -m benchmark.benchmark_newton_schulz --batch_size 1 --expansion 16 --plot
+python microplot.py

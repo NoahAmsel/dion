@@ -21,7 +21,7 @@ import torch
 import triton.testing as tt
 
 from dion.newton_schulz_triton import (
-    newton_schulz_appendixF_triton,
+    newton_schulz_triton_adaptive,
     newton_schulz_triton,
     zeropower_via_newtonschulz5,
 )
@@ -114,10 +114,12 @@ def bench_plot(batch_size: int, expansion: int, *, out_dir: Path = Path("plots")
             line_arg="provider",
             line_vals=["torch", "triton", "appendixF"],
             line_names=["torch", "triton", "appendixF"],
-            ylabel="TFLOPS (or equivalent)",
+            # ylabel="TFLOPS (or equivalent)",
+            ylabel="Step time (ms)",
             plot_name=f"newton_schulz_batch{batch_size}_expansion{expansion}",
             args={"batch_size": batch_size, "expansion": expansion},
             x_log=True,
+            y_log=True,
         )
     )
     def bench(dim: int, provider: str, batch_size: int, expansion: int = 1):
@@ -127,10 +129,11 @@ def bench_plot(batch_size: int, expansion: int, *, out_dir: Path = Path("plots")
         elif provider == "triton":
             ms = tt.do_bench(lambda: newton_schulz_triton(G))
         elif provider == "appendixF":
-            ms = tt.do_bench(lambda: newton_schulz_appendixF_triton(G))
+            ms = tt.do_bench(lambda: newton_schulz_triton_adaptive(G))
         else:  # "triton"
             raise ValueError(f"Unknown provider: {provider}")
-        return tflops(ms, gemm_cost(dim, dim), steps=5, batch=batch_size)
+        # return tflops(ms, gemm_cost(dim, dim), steps=5, batch=batch_size)
+        return ms
 
     bench.run(print_data=True, save_path=str(out_dir))
 
