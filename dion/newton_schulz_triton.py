@@ -334,6 +334,26 @@ def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7):
 
 
 @torch.compile(dynamic=False, fullgraph=True)
+def eig_polar(G: Tensor):
+    X = G.to(dtype=torch.bfloat16)
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+
+    # Ensure spectral norm is at most 1
+    X = X / X.norm(dim=(-2, -1), keepdim=True)
+
+    A = ns_line_1(X)  # A = X @ X.mT
+    Lambda, V = torch.linalg.eigh(A.float())
+    A = V.bfloat16()
+    A = (A * Lambda.rsqrt().bfloat16().unsqueeze(-2)) @ A.mT
+    X = A @ X
+
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+    return X
+
+
+@torch.compile(dynamic=False, fullgraph=True)
 def newton_schulz_triton(G: Tensor, epsilon: float = 1e-7):
     """
     Triton implementation of Newton-Schulz iteration
@@ -375,7 +395,7 @@ def newton_schulz_triton(G: Tensor, epsilon: float = 1e-7):
 
 
 @torch.compile(dynamic=False, fullgraph=True)
-def newton_schulz_appendixF_triton(G: Tensor, epsilon: float = 1e-7):
+def newton_schulz_appendixF_triton(G: Tensor, shift_epsilon: float = 1e-3, epsilon: float = 1e-7):
     """
     Triton implementation of Newton-Schulz iteration
     """
@@ -407,12 +427,31 @@ def newton_schulz_appendixF_triton(G: Tensor, epsilon: float = 1e-7):
 
     a0, b0, c0 = ns_consts[0]
     ns_line_1(X, out=Y)  # Y = X @ X.mT
+    # Y = ns_line_1(X.float()).bfloat16()  # Y = X @ X.mT
+    if shift_epsilon != 0:
+        Y += shift_epsilon * torch.eye(X.size(-2), X.size(-2), device=X.device, dtype=X.dtype)
     ns_line_2(Y, alpha=c0, beta=b0, out=Q)  # Q = b0 * Y + c0 * Y @ Y
     Q += a0*torch.eye(X.size(-2), X.size(-2), device=X.device, dtype=X.dtype)  # TODO: fix this, perhaps as below?
     # Q.diagonal(dim1=-2, dim2=-1).add_(a0)  # Q += a0*I
 
     # Perform the NS iterations
-    for a, b, c in ns_consts[1:]:
+    for a, b, c in ns_consts[1:3]:
+    # for a, b, c in ns_consts[1:]:
+        R = Q.mT @ Y @ Q  # TODO: implement as triton kernel
+        ns_line_2(R, alpha=c, beta=b, out=temp)
+        ns_line_3(Q, Q, temp, beta=a, out=temp2)
+        Q, temp2 = temp2, Q  # Swap references to avoid unnecessary copies
+
+    X = Q @ X
+
+    a3, b3, c3 = ns_consts[3]
+    ns_line_1(X, out=Y)  # Y = X @ X.mT
+    ns_line_2(Y, alpha=c3, beta=b3, out=Q)  # Q = b0 * Y + c0 * Y @ Y
+    Q += a3*torch.eye(X.size(-2), X.size(-2), device=X.device, dtype=X.dtype)  # TODO: fix this, perhaps as below?
+    # Q.diagonal(dim1=-2, dim2=-1).add_(a0)  # Q += a0*I
+
+    # Perform the NS iterations
+    for a, b, c in ns_consts[4:]:
         R = Q.mT @ Y @ Q  # TODO: implement as triton kernel
         ns_line_2(R, alpha=c, beta=b, out=temp)
         ns_line_3(Q, Q, temp, beta=a, out=temp2)
@@ -431,3 +470,53 @@ def newton_schulz_triton_adaptive(G: Tensor, epsilon: float = 1e-7):
         return newton_schulz_appendixF_triton(G, epsilon=epsilon)
     else:
         return newton_schulz_triton(G, epsilon=epsilon)
+
+
+@torch.compile(dynamic=False, fullgraph=True)
+def newton_schulz_stopper(G: torch.Tensor, ell, tol=.1, max_iter=20, epsilon: float = 1e-7):
+    """
+    Triton implementation of Newton-Schulz iteration
+    - always does Appendix F trick with no restarting
+    - chooses coefficients adaptively like Chen and Chow
+    - stops 
+    """
+
+    X = G.to(dtype=torch.bfloat16)
+    if G.size(-2) > G.size(-1):  # we want matrices to be fat
+        X = X.mT
+
+    # Ensure spectral norm is at most 1
+    # TODO use Schatten-4
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + epsilon)
+
+    # Allocate buffers
+    X = X.contiguous()
+    Y = torch.empty((*X.shape[:-1], X.size(-2)), device=X.device, dtype=X.dtype)
+    Q = torch.empty((*X.shape[:-1], X.size(-2)), device=X.device, dtype=X.dtype)
+    temp = torch.empty((*X.shape[:-1], X.size(-2)), device=X.device, dtype=X.dtype)
+
+    ns_line_3 = torch.baddbmm if X.ndim > 2 else torch.addmm
+    trace = lambda X: torch.einsum("...ii", X).min() if X.ndim > 2 else torch.trace
+
+    ell = torch.tensor(ell, device=G.device, dtype=G.dtype)
+    alpha = torch.sqrt(3 / (1 + ell * (1 + ell)))
+    ns_line_1(X, out=Y)  # Y = X @ X.mT
+    # Y = ns_line_1(X.float()).bfloat16()  # Y = X @ X.mT
+    Q = (-0.5 * alpha**3) * Y + (1.5*alpha) * torch.eye(X.size(-2), X.size(-2), device=X.device, dtype=X.dtype)
+    ell = 1.5 * (alpha * ell) - 0.5 * (alpha * ell)**3
+
+    # Perform the NS iterations
+    for _ in range(max_iter):
+        R = Q.mT @ Y @ Q  # TODO: implement as triton kernel
+        alpha = torch.sqrt(3 / (1 + ell * (1 + ell)))
+        ns_line_3(Q, Q, R, beta=(1.5*alpha), alpha=(-0.5 * alpha**3), out=temp)
+        Q, temp = temp, Q  # Swap references to avoid unnecessary copies
+        # if trace(R) > X.size(-2) - tol:
+        #     break
+        ell = 1.5 * (alpha * ell) - 0.5 * (alpha * ell)**3
+
+    X = Q @ X
+
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+    return X
