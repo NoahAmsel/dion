@@ -6,7 +6,7 @@ import pandas as pd
 import seaborn as sns
 
 
-plots_dir = "plots"
+plots_dir = Path("plots")
 pattern = re.compile(r"^(?P<prefix>.+?)_batch(?P<batch>[^_]+)_expansion(?P<expansion>[^.]+)\.csv$")
 
 run_dfs = []

@@ -103,14 +103,23 @@ if __name__ == "__main__":
             torch.logspace(0, -3, steps=n),
             torch.logspace(0, -5, steps=n),
             torch.logspace(0, -7, steps=n),
+            torch.logspace(0, -9, steps=n),
             torch.cat((
                 torch.logspace(0, -2, steps=n//2),
-                torch.zeros(n - n//2)
+                torch.zeros(n - n//2),
             )),
             torch.cat((
                 torch.logspace(0, -1, steps=10),
-                torch.zeros(n - 10)
+                torch.zeros(n - 10),
             )),
+            torch.cat((
+                torch.logspace(0, -0.5, steps=2),
+                torch.zeros(n - 2),
+            )),
+            torch.cat((
+                torch.logspace(0, -0.5, steps=2),
+                torch.logspace(-4, -7, steps=n - 2),
+            ))
         ] + [
             torch.distributions.Gamma(concentration=3, rate=0.5).sample((n,))
             for _ in range(5)
@@ -119,7 +128,7 @@ if __name__ == "__main__":
         matrix_iter = map(lambda s: spectrum2matrix(s, aspect_ratio), spectra)
         num = len(spectra)
 
-    our_method = partial(final_appF, first_restart=3, restart_interval=5, shift_eps=1e-3)
+    our_method = partial(final_appF, restart_interval=3, shift_eps=1e-3)
     df = run_comparison(our_method, PolarExpress, STEPS, matrix_iter, iterlen=num)
     df.to_pickle(f"plots/appF_{test_set}_{STEPS}_steps.pkl")
     print(len(df))
