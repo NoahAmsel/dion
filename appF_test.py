@@ -3,6 +3,7 @@ from dion.polarExp import *
 import os
 from tqdm import tqdm
 
+# Extract all the spectra
 # svs = []
 # bad_g_dir = "bad_G"
 # matrix_files = sorted(
@@ -40,23 +41,39 @@ S = torch.concat((
     # torch.logspace(-2, -2, steps=len(S)-2, device=S.device, dtype=S.dtype)
     torch.zeros(len(S) - 2, device=S.device, dtype=S.dtype)
 ))
+# S = torch.logspace(0, -3, steps=len(S), device=S.device, dtype=S.dtype)
 matrix = U @ torch.diag(S) @ Vh
 
 
-def eval(matrix, true_polar, estimate):
+def eval(matrix, true_polar, estimate, verbose=True):
+    assert estimate.isfinite().all()
     estimate = estimate.to(matrix.dtype)
-    I = torch.eye(estimate.shape[0], device=estimate.device, dtype=estimate.dtype)
-    # print(f"relative error: {((estimate - true_polar).norm() / (true_polar).norm()).item():.6f}")
-    print(f"orthogonality error: {((estimate @ estimate.mT - I).norm() / I.norm()).item():.6f}")
     H = estimate.mT @ matrix
     H = (H + H.mT) / 2
-    print(f"residual error: {((estimate @ H - matrix).norm() / matrix.norm()).item():.6f}")
+    I = torch.eye(estimate.shape[0], device=estimate.device, dtype=estimate.dtype)
+
+    # print(f"relative error: {((estimate - true_polar).norm() / (true_polar).norm()).item():.6f}")
+    orthogonality_error = ((estimate @ estimate.mT - I).norm() / I.norm()).item()
+    residual_error = ((estimate @ H - matrix).norm() / matrix.norm()).item()
     Heigs = torch.linalg.eigvalsh(H)
     psd_error = (Heigs[Heigs < 0]).norm() / (Heigs[Heigs > 0]).norm()
-    print(f"psd error: {psd_error:.6f}")
     nuc = torch.linalg.matrix_norm(matrix, ord='nuc')
-    print(f"dual obj: {((nuc - torch.trace(estimate.mT @ matrix))/nuc).item():.6f}")
-    print(f"bound violation: {max((torch.linalg.matrix_norm(estimate, ord=2) - 1).item(), 0):.6f}")
+    dual_obj = ((nuc - torch.trace(estimate.mT @ matrix))/nuc).item()
+    bound_violation = max((torch.linalg.matrix_norm(estimate, ord=2) - 1).item(), 0)
+
+    if verbose:
+        print(f"orthogonality error: {orthogonality_error:.6f}")
+        print(f"residual error: {residual_error:.6f}")
+        print(f"psd error: {psd_error:.6f}")
+        print(f"dual obj: {dual_obj:.6f}")
+        print(f"bound violation: {bound_violation:.6f}")
+    return dict(
+        orth_error=orthogonality_error,
+        residual_error=residual_error,
+        psd_error=psd_error,
+        dual_obj=dual_obj,
+        bound_violation=bound_violation,
+    )
 
 
 # if matrix.shape[0] < matrix.shape[1]:
@@ -67,7 +84,7 @@ def eval(matrix, true_polar, estimate):
 # exit(0)
 
 
-STEPS = 30
+STEPS = 15
 
 print("*"*30)
 print("reference")
@@ -97,9 +114,14 @@ eval(matrix, U @ Vh, PolarExpress(matrix, steps=STEPS))
 # eval(matrix, U @ Vh, out)
 # torch.save(logs, "intermediate_alt2.pt")
 
+# print("*"*30)
+# print("Alt3")
+# out = alt3(matrix, steps=STEPS, restart_interval=5, shift_eps=1e-3)
+# eval(matrix, U @ Vh, out)
+
 print("*"*30)
 print("Final")
-out = final_appF(matrix, steps=30, restart_interval=1, shift_eps=1e-3)
+out = final_appF(matrix, steps=STEPS, restart_interval=5, shift_eps=1e-3)
 eval(matrix, U @ Vh, out)
 
 # print("*"*30)
