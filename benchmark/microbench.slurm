@@ -11,6 +11,8 @@
 
 # set -euo pipefail
 
+# Run the script from the dion root directory
+
 # Ensure logs directory exists (safe even if already present)
 mkdir -p slurm_logs
 
@@ -20,4 +22,4 @@ python -m benchmark.benchmark_newton_schulz --batch_size 1 --expansion 3 --plot
 python -m benchmark.benchmark_newton_schulz --batch_size 1 --expansion 4 --plot
 python -m benchmark.benchmark_newton_schulz --batch_size 1 --expansion 8 --plot
 python -m benchmark.benchmark_newton_schulz --batch_size 1 --expansion 16 --plot
-python microplot.py
+python benchmark/microplot.py

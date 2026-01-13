@@ -26,7 +26,7 @@ from dion.newton_schulz_triton import (
     zeropower_via_newtonschulz5,
 )
 
-from dion.polarExp import final_appF
+from dion.polarExp import PolarExpressAdaptiveF
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -114,8 +114,8 @@ def bench_plot(batch_size: int, expansion: int, *, out_dir: Path = Path("plots")
             x_names=["dim"],
             x_vals=[512, 1024, 2048, 4096, 8192],
             line_arg="provider",
-            line_vals=["torch", "triton", "appendixF", "appendixF_stable"],  # "eig_polar"
-            line_names=["torch", "triton", "appendixF", "appendixF_stable"],  # "eig_polar"
+            line_vals=["torch", "triton", "appendixF_naive", "appendixF_stable"],  # "eig_polar"
+            line_names=["torch", "triton", "appendixF_naive", "appendixF_stable"],  # "eig_polar"
             # ylabel="TFLOPS (or equivalent)",
             ylabel="Step time (ms)",
             plot_name=f"newton_schulz_batch{batch_size}_expansion{expansion}",
@@ -130,10 +130,10 @@ def bench_plot(batch_size: int, expansion: int, *, out_dir: Path = Path("plots")
             ms = tt.do_bench(lambda: zeropower_via_newtonschulz5(G))
         elif provider == "triton":
             ms = tt.do_bench(lambda: newton_schulz_triton(G))
-        elif provider == "appendixF":
+        elif provider == "appendixF_naive":
             ms = tt.do_bench(lambda: newton_schulz_triton_adaptive(G))
         elif provider == "appendixF_stable":
-            ms = tt.do_bench(lambda: final_appF(G, steps=5, restart_interval=5, first_restart=3, shift_eps=1e-3))
+            ms = tt.do_bench(lambda: PolarExpressAdaptiveF(G))
         else:  # "triton"
             raise ValueError(f"Unknown provider: {provider}")
         # return tflops(ms, gemm_cost(dim, dim), steps=5, batch=batch_size)

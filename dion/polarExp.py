@@ -1,6 +1,6 @@
 from itertools import repeat
 import torch
-from .newton_schulz_triton import *
+from .newton_schulz_triton import ns_line_1, ns_line_2
 
 
 coeffs_list = [
@@ -23,14 +23,41 @@ def PolarExpress(G: torch.Tensor, steps: int) -> torch.Tensor:
     assert G.ndim >= 2
     X = G.bfloat16()  # for speed
     if G.size(-2) > G.size(-1): X = X.mT  # this reduces FLOPs
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 +1e-7)
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-7)
     hs = coeffs_list[:steps] + list( 
         repeat(coeffs_list[-1], steps - len(coeffs_list)))
-    # hs = [(1.5, -0.5, 0)] * steps
     for a, b, c in hs:
         A = X @ X.mT
         B = b * A + c * A @ A
         X = a * X + B @ X  # X <- aX + bX^3 + cX^5
+    if G.size(-2) > G.size(-1): X = X.mT
+    return X
+
+
+@torch.compile(dynamic=False, fullgraph=True)
+def PolarExpress_triton(G: torch.Tensor, steps: int) -> torch.Tensor:
+    """
+    Direct copy of newton_schulz_triton, but with Polar Express coefficients
+    """
+    X = G.to(dtype=torch.bfloat16)
+    if G.size(-2) > G.size(-1): X = X.mT
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-7)
+    hs = coeffs_list[:steps] + list( 
+        repeat(coeffs_list[-1], steps - len(coeffs_list)))
+
+    # Allocate buffers
+    X = X.contiguous()
+    A = torch.empty((*X.shape[:-1], X.size(-2)), device=X.device, dtype=X.dtype)
+    B = torch.empty_like(A)
+    C = torch.empty_like(X)
+    ns_line_3 = torch.baddbmm if X.ndim > 2 else torch.addmm
+
+    # Perform the NS iterations
+    for a, b, c in hs:
+        ns_line_1(X, out=A)  # A = X @ X.mT
+        ns_line_2(A, alpha=c, beta=b, out=B)  # B = b * A + c * A @ A
+        ns_line_3(X, B, X, beta=a, out=C)  # C = a * X + B @ X
+        X, C = C, X  # Swap references to avoid unnecessary copies
     if G.size(-2) > G.size(-1): X = X.mT
     return X
 
@@ -191,74 +218,77 @@ def alt3(G: torch.Tensor, steps: int, restart_interval: int, shift_eps: float = 
     return X
 
 
+def quadratic(R, a, b, c, out):
+    """Computes out = aI + bR + cR^2"""
+    # TODO! implement with a triton kernel
+    ns_line_1(R, out=out)
+    out.mul_(c).add_(R, alpha=b)
+    I = torch.eye(R.shape[-2], device=R.device, dtype=R.dtype)  # TODO! don't create this every time
+    out.add_(I, alpha=a)
+
+    # NOTE BUG: below should be a better way to compute bR + cR^2
+    # but if you use torch.compile and addmm, we get blow ups to infinite values...
+    # R_copy = R.clone()
+    # R_copy2 = R.clone()
+    # addmm = torch.baddbmm if R.ndim > 2 else torch.addmm
+    # addmm(R, R_copy, R_copy2, beta=b, alpha=c, out=out)  # bR + cR^2
+    # END BUG
+
+    # NOTE: below should be a better way to add aI to the diagonal of out in-place, but it gives compiler problems
+    # with warnings.catch_warnings():
+    #     warnings.filterwarnings("ignore", message=".*torch._prims_common.check.*", category=FutureWarning)
+    #     out.diagonal(dim1=-2, dim2=-1).add_(a)
+
+
+def symmetric_matmul(A, B, out):
+    """Computes out = A @ B where A and B are symmetric matrices."""
+    # TODO! Currently just does regular matmul.
+    torch.matmul(A, B, out=out)
+
+
 @torch.compile(dynamic=False, fullgraph=True)
 def final_appF(G: torch.Tensor, steps: int, restart_interval: int, shift_eps: float = 0, first_restart: int = 0) -> torch.Tensor:
     assert G.ndim >= 2
-    X = G.bfloat16()
+    X = G.to(dtype=torch.bfloat16)
     if G.size(-2) > G.size(-1): X = X.mT  # this reduces FLOPs
     X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-7)
     hs = coeffs_list[:steps] + list( 
         repeat(coeffs_list[-1], steps - len(coeffs_list)))
+    
+    # Allocate buffers
     I = torch.eye(X.shape[-2], device=X.device, dtype=X.dtype)
     R = torch.empty((*X.shape[:-1], X.size(-2)), device=X.device, dtype=X.dtype)
-    Q = torch.empty((*X.shape[:-1], X.size(-2)), device=X.device, dtype=X.dtype)
-    M1 = torch.empty((*X.shape[:-1], X.size(-2)), device=X.device, dtype=X.dtype)
-    M2 = torch.empty((*X.shape[:-1], X.size(-2)), device=X.device, dtype=X.dtype)
-    addmm = torch.baddbmm if X.ndim > 2 else torch.addmm
+    Q = torch.empty_like(R)
+    M1 = torch.empty_like(R)
+    M2 = torch.empty_like(R)
+
     for iter, (a, b, c) in enumerate(hs):
         if iter == 0:
             ns_line_1(X, out=R)  # R = X @ X.mT
-            R.add_(I, alpha=shift_eps).mul_(1/(1+shift_eps))  # numerical stability
-            # Q = a*I + mm(R, b*I + c*R)
-            # R = Q.mT @ R @ Q
-
-            Q = b*R + c*(R @ R)
-            # addmm(R, R, R, beta=b, alpha=c, out=Q)  # bR + cR^2
-            # Q = (Q + Q.mT) / 2
-            Q.add_(I, alpha=a)  # aI + bR + cR^2
-            torch.matmul(R, Q, out=M2)
-            torch.matmul(Q.mT, M2, out=R)
+            R.add_(I, alpha=shift_eps).mul_(1/(1+shift_eps))  # (R + eps*I) / (1 + eps) numerical stability
+            quadratic(R, a, b, c, out=Q)  # Q = aI + bR + cR^2
+            symmetric_matmul(R, Q, out=M2); symmetric_matmul(Q.mT, M2, out=R)  # R = Q R Q
         elif (iter >= first_restart) and ((iter - first_restart) % restart_interval == 0):
-            X = Q @ X
+            X = Q @ X  # TODO: is this inplace?
             ns_line_1(X, out=R)  # R = X @ X.mT
-            # Q = a*I + mm(R, b*I + c*R)
-            # R = Q.mT @ R @ Q
-
-            Q = b*R + c*(R @ R)
-            # NOTE BUG: below should be equivalent to previous line
-            # but if you use torch.compile and addmm, we get blow ups to infinite values...
-            # R_copy = R.clone()
-            # R_copy2 = R.clone()
-            # Q = addmm(R, R_copy, R_copy2, beta=b, alpha=c)  # bR + cR^2
-            # END BUG
-            # Q = (Q + Q.mT) / 2
-            Q.add_(I, alpha=a)  # aI + bR + cR^2
-            torch.matmul(R, Q, out=M2)
-            torch.matmul(Q.mT, M2, out=R)
+            quadratic(R, a, b, c, out=Q)  # Q = aI + bR + cR^2
+            symmetric_matmul(R, Q, out=M2); symmetric_matmul(Q.mT, M2, out=R)  # R = Q R Q
         else:
-            # hR = a*I + mm(R, b*I + c*R)  # aI + bR + cR^2 =: aI + M1
-            # R = hR.mT @ R @ hR  # = a^2 R + 2aRM1 + M1 R M1
-            # Q = hR @ Q
+            quadratic(R, a, b, c, out=M1)  # M1 = aI + bR + cR^2
+            symmetric_matmul(R, M1, out=M2); symmetric_matmul(M1.mT, M2, out=R)  # R = M1 R M1
+            symmetric_matmul(M1, Q, out=M2); Q, M2 = M2, Q  # Q = M1 Q
 
-            M1 = b*R + c*(R @ R)
-            # addmm(R, R, R, beta=b, alpha=c, out=M1)  # bR + cR^2
-            M1.add_(I, alpha=a)  # aI + bR + cR^2
-            # M1 = (M1 + M1.mT) / 2
-            torch.matmul(R, M1, out=M2)
-            torch.matmul(M1.mT, M2, out=R)
-            torch.matmul(M1, Q, out=M2)
-            Q, M2 = M2, Q
-
-            # addmm(R, R, R, beta=b, alpha=c, out=M1)  # M1 = bR + cR^2
-            # torch.matmul(R, M1, out=M2)
-            # R.mul_(a**2).add_(M2, alpha=2*a)
-            # R.addmm_(M1, M2)  # R = a^2 R + 2aM2 + M1 M2
-            # addmm(Q, M1, Q, beta=a, out=M2)  # hR @ Q = aQ + (bR + cR^2)Q
-            # Q, M2 = M2, Q
-
-    X = Q @ X
+    X = Q @ X  # TODO: is this inplace?
     if G.size(-2) > G.size(-1): X = X.mT
     return X
+
+
+@torch.compile(dynamic=False, fullgraph=True)
+def PolarExpressAdaptiveF(G: torch.Tensor):
+    if max(G.shape[-2:]) > 2 * min(G.shape[-2:]):
+        return final_appF(G, steps=5, restart_interval=5, first_restart=3, shift_eps=1e-3)
+    else:
+        return PolarExpress_triton(G, steps=5)
 
 
 @torch.compile(dynamic=False, fullgraph=True)
