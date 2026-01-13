@@ -6,7 +6,7 @@ import pandas as pd
 import seaborn as sns
 
 
-plots_dir = Path(__file__).resolve().parent / "plots"
+plots_dir = Path("plots")
 pattern = re.compile(r"^(?P<prefix>.+?)_batch(?P<batch>[^_]+)_expansion(?P<expansion>[^.]+)\.csv$")
 
 run_dfs = []
@@ -21,9 +21,10 @@ for path in plots_dir.glob("*.csv"):
         run_dfs.append(one_run_df)
 
 all_runs_df = pd.concat(run_dfs, ignore_index=True)
+id_vars=('dim', 'batch', 'expansion',)
 all_runs_df = all_runs_df.melt(
-    id_vars=[c for c in all_runs_df.columns if c not in ("torch", "triton", "appendixF")],
-    value_vars=["torch", "triton", "appendixF"],
+    id_vars=id_vars,
+    value_vars=[c for c in all_runs_df.columns if c not in id_vars],
     var_name="method",
     value_name="runtime (ms)",
 )
