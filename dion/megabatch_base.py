@@ -9,6 +9,7 @@ from torch.optim.optimizer import Optimizer, ParamsT
 from typing import Callable, Generator, List, Optional, Union
 
 from .newton_schulz_triton import newton_schulz_triton, zeropower_via_newtonschulz5
+from .polar_express import polar_express, polar_express_triton
 from .opt_utils import AsyncRuntime, AsyncTask, to_local
 from .scalar_opts import adamw_update_foreach_async, lion_update_foreach_async
 from .muon import muon_update_newton_schulz, adjust_lr_spectral_norm, adjust_lr_rms_norm
@@ -30,6 +31,7 @@ class DistributedOrthoBase(Optimizer):
         algo_name: str,
         defaults: dict,
         use_triton: bool = False,
+        use_polar_express: bool = False,
         newton_schulz_func: Optional[Callable] = None,
     ):
         super().__init__(params, defaults)
@@ -60,13 +62,17 @@ class DistributedOrthoBase(Optimizer):
             )
         self._distributed_mesh = distributed_mesh
 
-        # Newton-Schulz configuration
+        # Orthogonalization function configuration
         if newton_schulz_func is not None:
             if not callable(newton_schulz_func):
                 raise TypeError(
                     f"newton_schulz_func must be a callable function, got {type(newton_schulz_func)}"
                 )
             self._newton_schulz_func = newton_schulz_func
+        elif use_polar_express and use_triton:
+            self._newton_schulz_func = polar_express_triton
+        elif use_polar_express:
+            self._newton_schulz_func = polar_express
         elif use_triton:
             self._newton_schulz_func = newton_schulz_triton
         else:

@@ -9,6 +9,7 @@ from torch.optim.optimizer import Optimizer, ParamsT
 from typing import Callable, Generator, List, Optional, Tuple, Union
 
 from .newton_schulz_triton import newton_schulz_triton
+from .polar_express import polar_express, polar_express_triton
 from .opt_utils import (
     AsyncRuntime,
     AsyncTask,
@@ -64,6 +65,7 @@ class Muon(Optimizer):
         adjust_lr: Optional[str] = "spectral_norm",
         flatten: bool = False,
         use_triton: bool = False,
+        use_polar_express: bool = False,
         newton_schulz_func: Optional[Callable] = None,
     ):
         # Check hyperparameters
@@ -118,13 +120,17 @@ class Muon(Optimizer):
             )
         self._distributed_mesh = distributed_mesh
 
-        # Newton-Schulz configuration
+        # Orthogonalization function configuration
         if newton_schulz_func is not None:
             if not callable(newton_schulz_func):
                 raise TypeError(
                     f"newton_schulz_func must be a callable function, got {type(newton_schulz_func)}"
                 )
             self._newton_schulz_func = newton_schulz_func
+        elif use_polar_express and use_triton:
+            self._newton_schulz_func = polar_express_triton
+        elif use_polar_express:
+            self._newton_schulz_func = polar_express
         elif use_triton:
             self._newton_schulz_func = newton_schulz_triton
         else:
