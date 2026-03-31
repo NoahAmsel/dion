@@ -63,6 +63,7 @@ class NorMuon(DistributedOrthoBase):
         nesterov: bool = False,
         adjust_lr: Optional[str] = "rms_norm",
         flatten: bool = False,
+        use_gram_newton_schulz: bool = False,
         use_triton: bool = False,
         use_polar_express: bool = False,
         newton_schulz_func: Optional[Callable] = None,
@@ -97,6 +98,7 @@ class NorMuon(DistributedOrthoBase):
         )
         super().__init__(
             params, distributed_mesh, "normuon", defaults,
+            use_gram_newton_schulz=use_gram_newton_schulz,
             use_triton=use_triton, use_polar_express=use_polar_express,
             newton_schulz_func=newton_schulz_func,
         )
