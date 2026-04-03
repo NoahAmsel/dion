@@ -78,7 +78,11 @@ class DistributedOrthoBase(Optimizer):
             from gram_newton_schulz import GramNewtonSchulz
             assert use_polar_express, "At present, Gram Newton Schulz only uses Polar Express"
             _gns = GramNewtonSchulz(
-                ns_use_kernels=use_triton, use_gram_newton_schulz=True, gram_newton_schulz_reset_iterations=[2]
+                ns_use_kernels=use_triton,
+                use_gram_newton_schulz=True,
+                gram_newton_schulz_reset_iterations=[2],
+                # Some compiler crashes were observed with mode="reduce-overhead" when we also compile the entire optimizer step.
+                compile_kwargs=dict(fullgraph=True, mode="default"),
             )
             self._newton_schulz_func = lambda X, epsilon=None: _gns(X)
         elif use_polar_express and use_triton:
