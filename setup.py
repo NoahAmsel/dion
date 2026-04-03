@@ -64,7 +64,7 @@ setup(
     ],
     python_requires=">=3.9",
     license="MIT",
-    install_requires=install_requires,
+    install_requires=install_requires + install_train_requires,
     extras_require={
         "dev": install_dev_requires,  # Can be installed with `pip install dion[dev]`
         "train": install_train_requires,
