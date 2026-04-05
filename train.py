@@ -232,6 +232,7 @@ def parse_cli_args():
             "no_triton",
             "use_polar_express",
             "use_gram_newton_schulz",
+            "time_optimizer",
             "debug",
         ):
             if yaml_cfg.get(flag, False):
