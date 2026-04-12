@@ -229,13 +229,23 @@ def dion2_update_megabatch_async(
         _print_selection_choice(X[0].shape, shard_dim, select_dim, ndim)
 
     # Pre-orthogonalize: momentum update + submatrix selection
-    U_selected, indices_list = dion2_pre_orthogonalize(
-        G=to_local(G),
-        M=to_local(M),
-        fraction=fraction,
-        ef_decay=ef_decay,
-        select_dim=select_dim,
-    )
+    if fraction >= 1.0:
+        # Fast path: skip selection, use full momentum directly
+        U_selected = dion2_pre_orthogonalize_full(
+            G=to_local(G),
+            M=to_local(M),
+            ef_decay=ef_decay,
+        )
+        indices_list = None
+    else:
+        # Selection path: norm → topk → gather submatrix
+        U_selected, indices_list = dion2_pre_orthogonalize(
+            G=to_local(G),
+            M=to_local(M),
+            fraction=fraction,
+            ef_decay=ef_decay,
+            select_dim=select_dim,
+        )
 
     # comm_dim for sharded communication: use select_dim (which equals normalized shard_dim)
     comm_dim = select_dim if is_sharded else None
@@ -280,7 +290,15 @@ def dion2_update_megabatch_async(
         raise ValueError(f"Unknown adjust_lr: {adjust_lr}")
 
     # Post-orthogonalize: apply update
-    if triton_post_ortho:
+    if indices_list is None:
+        dion2_post_orthogonalize_full(
+            X=to_local(X),
+            U=U_ortho,
+            base_lr=lr,
+            adjusted_lr=adjusted_lr,
+            weight_decay=weight_decay,
+        )
+    elif triton_post_ortho:
         from .dion2_triton import dion2_post_orthogonalize_triton
 
         dion2_post_orthogonalize_triton(
@@ -302,6 +320,24 @@ def dion2_update_megabatch_async(
             weight_decay=weight_decay,
             select_dim=select_dim,
         )
+
+
+@torch.compile(fullgraph=True)
+def dion2_pre_orthogonalize_full(
+    G: List[Tensor],
+    M: List[Tensor],
+    ef_decay: Tensor,
+) -> List[Tensor]:
+    """
+    Fast path for fraction=1: update momentum and apply EF-decay to all
+    elements, skipping norm computation, topk selection, and gather.
+    """
+    dtype = M[0].dtype
+    G = [g.to(dtype=dtype) for g in G]
+    torch._foreach_add_(M, G)
+    U = [m.to(dtype=torch.bfloat16) for m in M]
+    torch._foreach_mul_(M, ef_decay)
+    return U
 
 
 # Workaround for a torch.compile bug in PyTorch ≤2.11's inductor backend:
@@ -428,6 +464,27 @@ def dion2_post_orthogonalize(
         else:
             idx_exp = idx.unsqueeze(-2).expand_as(u_scaled)
         x.scatter_add_(dim=select_dim, index=idx_exp, src=u_scaled)
+
+
+@torch.compile(fullgraph=True)
+def dion2_post_orthogonalize_full(
+    X: List[Tensor],
+    U: List[Tensor],
+    base_lr: Tensor,
+    adjusted_lr: Tensor,
+    weight_decay: Tensor,
+):
+    """
+    Fast path for fraction=1: apply weight decay and full update without
+    index bookkeeping.
+    """
+    torch._foreach_mul_(X, 1 - base_lr * weight_decay)
+
+    dtype = X[0].dtype
+    U = [u.to(dtype=dtype) for u in U]
+    neg_lr = -adjusted_lr
+    U_scaled = [neg_lr * u for u in U]
+    torch._foreach_add_(X, U_scaled)
 
 
 # A helper function to print selection choice for each matrix

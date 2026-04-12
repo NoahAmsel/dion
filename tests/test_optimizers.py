@@ -218,6 +218,53 @@ class TestDion2:
         params = _make_params([(4, 32, 64)] * 3)
         _run_steps(Dion2, params, dict(lr=0.01), n_steps=3)
 
+    def test_fraction1_fast_path_2d(self):
+        """fraction=1 fast path should match the selection path for 2D."""
+        from dion import Dion2
+        params = _make_params([(64, 128)])
+        p_fast = [torch.nn.Parameter(p.data.clone()) for p in params]
+        p_slow = [torch.nn.Parameter(p.data.clone()) for p in params]
+        r_fast = _run_steps(Dion2, p_fast, dict(lr=0.01, fraction=1.0), n_steps=3)
+        r_slow = _run_steps(Dion2, p_slow, dict(lr=0.01, fraction=0.999), n_steps=3)
+        assert not torch.equal(r_fast[0], params[0].data), "params should change"
+        assert torch.allclose(r_fast[0], r_slow[0]), "fast path and selection path should match"
+
+    def test_fraction1_fast_path_3d(self):
+        """fraction=1 fast path should match the selection path for 3D."""
+        from dion import Dion2
+        params = _make_params([(4, 32, 128)])
+        p_fast = [torch.nn.Parameter(p.data.clone()) for p in params]
+        p_slow = [torch.nn.Parameter(p.data.clone()) for p in params]
+        r_fast = _run_steps(Dion2, p_fast, dict(lr=0.01, fraction=1.0), n_steps=3)
+        r_slow = _run_steps(Dion2, p_slow, dict(lr=0.01, fraction=0.999), n_steps=3)
+        # Relaxed tolerance: the selection path (fraction=0.999) permutes
+        # rows/columns via topk before Newton-Schulz, changing floating-point
+        # accumulation order and producing small numerical differences.
+        assert torch.allclose(r_fast[0], r_slow[0], atol=1e-4), "fast path and selection path should match for 3D"
+
+    def test_fraction1_fast_path_megabatch(self):
+        """fraction=1 fast path should match selection path with megabatching."""
+        from dion import Dion2
+        params = _make_params([(64, 128)] * 5)
+        p_fast = [torch.nn.Parameter(p.data.clone()) for p in params]
+        p_slow = [torch.nn.Parameter(p.data.clone()) for p in params]
+        r_fast = _run_steps(Dion2, p_fast, dict(lr=0.01, fraction=1.0), n_steps=3)
+        r_slow = _run_steps(Dion2, p_slow, dict(lr=0.01, fraction=0.999), n_steps=3)
+        for i in range(5):
+            # Relaxed tolerance: the selection path (fraction=0.999) permutes
+            # rows/columns via topk before Newton-Schulz, changing floating-point
+            # accumulation order and producing small numerical differences.
+            assert torch.allclose(r_fast[i], r_slow[i], atol=1e-4), f"param {i}: fast and selection paths should match"
+
+    def test_fraction1_determinism(self):
+        """fraction=1 fast path should be deterministic."""
+        from dion import Dion2
+        p1 = _make_params([(64, 128)])
+        r1 = _run_steps(Dion2, p1, dict(lr=0.01, fraction=1.0))
+        p2 = _make_params([(64, 128)])
+        r2 = _run_steps(Dion2, p2, dict(lr=0.01, fraction=1.0))
+        assert torch.equal(r1[0], r2[0])
+
 
 # ---------------------------------------------------------------------------
 # num_heads per-group option (per-head Newton-Schulz on 2D weights)
