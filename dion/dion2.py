@@ -30,7 +30,7 @@ class Dion2(DistributedOrthoBase):
         ef_decay: Error-feedback decay factor applied to selected submatrix.
         betas: Tuple of (beta1, beta2) for AdamW and Lion algorithms.
         weight_decay: Weight decay factor.
-        epsilon: Small value to avoid division by zero.
+        epsilon: Small value to avoid division by zero in AdamW scalar updates.
         adjust_lr: How to adjust the learning rate for Muon updates ("spectral_norm" or "rms_norm" or None).
             "spectral_norm": Adjust based on spectral norm, for learning rate transfer across model scale.
             "rms_norm": Adjust based on RMS norm, for learning rate compatibility with Adam/AdamW.

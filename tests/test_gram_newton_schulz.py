@@ -94,9 +94,9 @@ def test_output_shape_matches_input(gns, shape):
 
 def _get_reference_fns():
     """Return named reference orthogonalization functions for comparison."""
-    from dion.muon import zeropower_via_newtonschulz5
     import sys, os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "benchmark"))
+    from newton_schulz_triton import zeropower_via_newtonschulz5
     from polar_express import polar_express
 
     return {
