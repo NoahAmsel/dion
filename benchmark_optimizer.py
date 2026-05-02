@@ -86,6 +86,11 @@ def build_model_and_optimizer(hp: Hyperparameters, cli_args: argparse.Namespace,
         n_head=hp.n_head,
         n_embd=hp.model_dim,
         use_bias=hp.use_bias,
+        use_moe=hp.use_moe,
+        num_local_experts=hp.num_local_experts,
+        num_experts_per_tok=hp.num_experts_per_tok,
+        moe_activation=hp.moe_activation,
+        moe_intermediate_size=hp.moe_intermediate_size,
     )
 
     with torch.device("meta"):
@@ -212,6 +217,9 @@ def build_and_benchmark(
         debug=False, no_compile=True, no_triton=False,
         use_polar_express=False, use_gram_newton_schulz=False,
         split_heads=False,
+        use_bias=False, use_moe=False,
+        num_local_experts=None, num_experts_per_tok=None, moe_activation=None,
+        moe_intermediate_size=None,
     )
 
     # Load YAML config if provided
