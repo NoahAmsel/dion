@@ -7,7 +7,7 @@ from torch.distributed.tensor import DeviceMesh, DTensor
 from torch.optim.optimizer import ParamsT
 from typing import Callable, Generator, List, Optional, Tuple, Union
 
-from dion.muon import muon_update_pre_orthogonalize
+from dion.muon import muon_update_post_orthogonalize, muon_update_pre_orthogonalize
 
 from .megabatch_base import (
     DistributedOrthoBase,
@@ -258,15 +258,24 @@ def dion2_update_megabatch_async(
     else:
         raise ValueError(f"Unknown adjust_lr: {adjust_lr}")
 
-    # Post-orthogonalize: apply update to selected indices only
-    dion2_post_orthogonalize(
+    # # Post-orthogonalize: apply update to selected indices only
+    # dion2_post_orthogonalize(
+    #     X=to_local(X),
+    #     U=U_ortho,
+    #     indices=indices_list,
+    #     base_lr=lr,
+    #     adjusted_lr=adjusted_lr,
+    #     weight_decay=weight_decay,
+    #     select_dim=select_dim,
+    # )
+    # Post-orthogonalize: apply update
+    muon_update_post_orthogonalize(
         X=to_local(X),
         U=U_ortho,
-        indices=indices_list,
         base_lr=lr,
         adjusted_lr=adjusted_lr,
         weight_decay=weight_decay,
-        select_dim=select_dim,
+        cautious_wd=False,
     )
 
 
