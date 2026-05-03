@@ -251,17 +251,19 @@ def muon_update_pre_orthogonalize(
     G = [g.to(dtype=dtype) for g in G]
 
     # Update momentum with new gradient
-    torch._foreach_mul_(M, momentum)
+    # torch._foreach_mul_(M, momentum)  #
     torch._foreach_add_(M, G)
 
     if nesterov:
         U = torch._foreach_mul(M, momentum)
         torch._foreach_add_(U, G)
     else:
-        U = M
+        U = [m.clone() for m in M]
 
     # Convert to bfloat16 before communication
     U = [u.to(dtype=torch.bfloat16) for u in U]
+
+    torch._foreach_mul_(M, momentum)
 
     return U
 

@@ -27,11 +27,11 @@ from models.gpt_model import GPT, GPTConfig
 def build_model():
     """Build a small GPT model on CUDA."""
     config = GPTConfig(
-        sequence_len=1024,
-        vocab_size=50176,
-        n_layer=4,
-        n_head=6,
-        n_embd=768,
+        sequence_len=2048,
+        vocab_size=100352,
+        n_layer=20,
+        n_head=16,
+        n_embd=1536,
         use_bias=False,
     )
     model = GPT(config)

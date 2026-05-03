@@ -316,6 +316,7 @@ def dion2_pre_orthogonalize(
 
     # Batched topk: indices shape (batch_size, k)
     _, indices = torch.topk(slice_norms, k, dim=-1, sorted=False)
+    indices, _ = indices.sort(dim=-1)
 
     # Extract the selected rows/columns from each momentum tensor.
     # `indices` has shape (..., k) where k is the number of selected slices.
