@@ -7,6 +7,8 @@ from torch.distributed.tensor import DeviceMesh, DTensor
 from torch.optim.optimizer import ParamsT
 from typing import Callable, Generator, List, Optional, Tuple, Union
 
+from dion.muon import muon_update_pre_orthogonalize
+
 from .megabatch_base import (
     DistributedOrthoBase,
     megabatch_orthogonalize_async,
@@ -217,14 +219,18 @@ def dion2_update_megabatch_async(
     if verbose:
         _print_selection_choice(X[0].shape, shard_dim, select_dim, ndim)
 
-    # Pre-orthogonalize: momentum update + submatrix selection
-    U_selected, indices_list = dion2_pre_orthogonalize(
-        G=to_local(G),
-        M=to_local(M),
-        fraction=fraction,
-        ef_decay=ef_decay,
-        select_dim=select_dim,
+    # # Pre-orthogonalize: momentum update + submatrix selection
+    # U_selected, indices_list = dion2_pre_orthogonalize(
+    #     G=to_local(G),
+    #     M=to_local(M),
+    #     fraction=fraction,
+    #     ef_decay=ef_decay,
+    #     select_dim=select_dim,
+    # )
+    U_selected = muon_update_pre_orthogonalize(
+        G=to_local(G), M=to_local(M), momentum=ef_decay, nesterov=False,
     )
+    indices_list = [torch.arange(u.size(select_dim), device=u.device) for u in U_selected]
 
     # comm_dim for sharded communication: use select_dim (which equals normalized shard_dim)
     comm_dim = select_dim if is_sharded else None
@@ -373,12 +379,15 @@ def dion2_post_orthogonalize(
     """
     torch._foreach_mul_(X, 1 - base_lr * weight_decay)
 
-    # Convert U to match parameter dtype
-    dtype = X[0].dtype
-    U = [u.to(dtype=dtype) for u in U]
+    # # Convert U to match parameter dtype
+    # dtype = X[0].dtype
+    # U = [u.to(dtype=dtype) for u in U]
     # Apply weight update
     neg_lr = -adjusted_lr
     U_scaled = [neg_lr * u for u in U]
+    # Convert U to match parameter dtype
+    dtype = X[0].dtype
+    U_scaled = [u.to(dtype=dtype) for u in U_scaled]
     # Apply the orthogonalized update to only the selected rows/columns.
     # scatter_add_ accumulates values into positions specified by the index tensor:
     #   x[..., idx_exp[..., i, j], j] += u_scaled[..., i, j]  (for select_dim == -2)
