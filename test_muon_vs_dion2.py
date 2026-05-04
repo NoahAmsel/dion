@@ -35,7 +35,7 @@ def build_model():
         use_bias=False,
     )
     model = GPT(config)
-    model.to("cuda")
+    model.to(device="cuda", dtype=torch.bfloat16)
     model.init_weights()
     return model
 
