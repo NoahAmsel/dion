@@ -51,6 +51,13 @@ class Hyperparameters:
     n_head: int = 6
     use_bias: bool = False
 
+    # MoE config
+    use_moe: bool = False
+    num_experts: int = 8
+    num_experts_per_tok: int = 2
+    moe_activation: str = "relu_squared"
+    moe_intermediate_size: int = None
+
     # Evaluation and logging
     val_loss_every: int = 125
     val_tokens: int = 10485760
@@ -336,6 +343,7 @@ def init_optimizer(
     # Separate the model's parameters based on their types
     qkv_params = []
     other_matrix_params = []
+    moe_expert_params = []
     array_and_embedding_params = []
     lm_head_params = []
     qkv_names = {"c_q.weight", "c_k.weight", "c_v.weight"}
@@ -346,6 +354,8 @@ def init_optimizer(
             qkv_params.append(p)
         elif "wte" in name:
             array_and_embedding_params.append(p)
+        elif "mlp.experts.gate_proj" in name or "mlp.experts.up_proj" in name or "mlp.experts.down_proj" in name or "mlp.experts.c_fc" in name:
+            moe_expert_params.append(p)
         elif (p.ndim >= 2) and ("wte" not in name):
             other_matrix_params.append(p)
         else:
@@ -359,6 +369,9 @@ def init_optimizer(
     if hp.split_heads:
         qkv_group["num_heads"] = hp.n_head
     param_groups.append(qkv_group)
+
+    if len(moe_expert_params) > 0:
+        param_groups.append(dict(params=moe_expert_params, num_experts=hp.num_experts, fraction=1.0))
 
     # Catch-all for everything that shouldn't be orthogonalized (biases, norms, embeddings)
     param_groups.append(
