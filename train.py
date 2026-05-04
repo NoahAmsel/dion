@@ -344,7 +344,6 @@ def init_optimizer(
     qkv_params = []
     other_matrix_params = []
     moe_expert_params = []
-    moe_router_params = []
     array_and_embedding_params = []
     lm_head_params = []
     qkv_names = {"c_q.weight", "c_k.weight", "c_v.weight"}
@@ -357,8 +356,6 @@ def init_optimizer(
             array_and_embedding_params.append(p)
         elif "mlp.experts.gate_proj" in name or "mlp.experts.up_proj" in name or "mlp.experts.down_proj" in name or "mlp.experts.c_fc" in name:
             moe_expert_params.append(p)
-        elif "mlp.router.weight" in name:
-            moe_router_params.append(p)
         elif (p.ndim >= 2) and ("wte" not in name):
             other_matrix_params.append(p)
         else:
@@ -374,9 +371,7 @@ def init_optimizer(
     param_groups.append(qkv_group)
 
     if len(moe_expert_params) > 0:
-        param_groups.append(dict(params=moe_expert_params, num_experts=hp.num_experts))
-    if len(moe_router_params) > 0:
-        param_groups.append(dict(params=moe_router_params))
+        param_groups.append(dict(params=moe_expert_params, num_experts=hp.num_experts, fraction=1.0))
 
     # Catch-all for everything that shouldn't be orthogonalized (biases, norms, embeddings)
     param_groups.append(
