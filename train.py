@@ -161,14 +161,6 @@ def parse_cli_args():
     parser.add_argument("--n_layer", type=int, default=None)
     parser.add_argument("--n_head", type=int, default=None)
 
-    # ---------- MoE config ----------
-    parser.add_argument("--use_moe", action="store_true", help="Use Mixture of Experts")
-    parser.add_argument("--num_experts", type=int, default=None, help="Number of experts per MoE layer")
-    parser.add_argument("--num_experts_per_tok", type=int, default=None, help="Number of experts per token (top-k)")
-    parser.add_argument("--moe_activation", type=str, default=None, choices=["relu_squared", "swiglu"], help="MoE activation function")
-    parser.add_argument("--moe_intermediate_size", type=int, default=None, help="MoE FFN intermediate size (default: 4 * model_dim)")
-
-
     # ---------- training hyperparameters ----------
     parser.add_argument(
         "--num_iterations", type=int, default=None, help="Number of training steps"
@@ -256,7 +248,6 @@ def parse_cli_args():
             "use_gram_newton_schulz",
             "split_heads",
             "time_optimizer",
-            "use_moe",
             "debug",
         ):
             if yaml_cfg.get(flag, False):
@@ -802,8 +793,6 @@ def main():
     print0(f"Model dimension: {hp.model_dim}")
     print0(f"Number of layers: {hp.n_layer}")
     print0(f"Number of heads: {hp.n_head}")
-    if hp.use_moe:
-        print0(f"Using MoE with {hp.num_experts} experts, {hp.num_experts_per_tok} per token")
 
     gpt_config = GPTConfig(
         sequence_len=hp.sequence_length,
@@ -812,11 +801,6 @@ def main():
         n_head=hp.n_head,
         n_embd=hp.model_dim,
         use_bias=hp.use_bias,
-        use_moe=hp.use_moe,
-        num_experts=hp.num_experts,
-        num_experts_per_tok=hp.num_experts_per_tok,
-        moe_activation=hp.moe_activation,
-        moe_intermediate_size=hp.moe_intermediate_size,
     )
     with torch.device("meta"):
         model = GPT(gpt_config)
