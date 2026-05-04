@@ -66,6 +66,7 @@ class Dion2(DistributedOrthoBase):
         use_gram_newton_schulz: bool = False,
         newton_schulz_func: Optional[Callable] = None,
         verbose: bool = False,
+        muon_mode: bool = False,
     ):
         # Validate hyperparameters
         if lr < 0.0:
@@ -102,6 +103,7 @@ class Dion2(DistributedOrthoBase):
             newton_schulz_func=newton_schulz_func,
         )
         self.verbose = verbose
+        self._muon_mode = muon_mode
 
     def _create_ortho_tasks(
         self, param_groups: List[dict]
@@ -169,6 +171,7 @@ class Dion2(DistributedOrthoBase):
                         M=momentums,
                         shard_dim=shard_dim,
                         **megabatch_args,
+                        muon_mode=self._muon_mode,
                     )
                 )
 
@@ -190,6 +193,7 @@ def dion2_update_megabatch_async(
     process_group: Optional[ProcessGroup] = None,
     newton_schulz_func: Optional[Callable] = None,
     verbose: bool = False,
+    muon_mode: bool = False,
 ) -> Generator[None, None, None]:
     """
     Mega-batched Dion2 update: processes ALL same-shape parameters in one
@@ -267,6 +271,7 @@ def dion2_update_megabatch_async(
         adjusted_lr=adjusted_lr,
         weight_decay=weight_decay,
         select_dim=select_dim,
+        muon_mode=muon_mode,
     )
 
 
@@ -371,6 +376,7 @@ def dion2_post_orthogonalize(
     adjusted_lr: Tensor,
     weight_decay: Tensor,
     select_dim: int,
+    muon_mode: bool,
 ):
     """
     Apply weight decay and weight update after orthogonalization.
@@ -395,10 +401,14 @@ def dion2_post_orthogonalize(
     dtype = X[0].dtype
     U = [u.to(dtype=dtype) for u in U]
 
-    # Apply the orthogonalized update to only the selected rows/columns.
-    dim = X[0].ndim + select_dim if select_dim < 0 else select_dim
-    for x, u_scaled, idx in zip(X, U_scaled, indices):
-        x.index_add_(dim, idx, u_scaled)
+    # this  makes dion2 and muon bitwise identical
+    if muon_mode:
+        torch._foreach_add_(X, U_scaled)
+    else:
+        # Apply the orthogonalized update to only the selected rows/columns.
+        dim = X[0].ndim + select_dim if select_dim < 0 else select_dim
+        for x, u_scaled, idx in zip(X, U_scaled, indices):
+            x.index_add_(dim, idx, u_scaled)
 
 
 # A helper function to print selection choice for each matrix
