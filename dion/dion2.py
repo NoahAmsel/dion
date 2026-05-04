@@ -379,9 +379,9 @@ def dion2_post_orthogonalize(
     """
     torch._foreach_mul_(X, 1 - base_lr * weight_decay)
 
-    # Convert U to match parameter dtype
-    dtype = X[0].dtype
-    U = [u.to(dtype=dtype) for u in U]
+    # # Convert U to match parameter dtype
+    # dtype = X[0].dtype
+    # U = [u.to(dtype=dtype) for u in U]
     # Apply weight update
     # neg_lr = -adjusted_lr
     # U_scaled = [neg_lr * u for u in U]
@@ -390,6 +390,10 @@ def dion2_post_orthogonalize(
     # U_scaled = [u.to(dtype=dtype) for u in U_scaled]
 
     U_scaled = torch._foreach_mul(U, -adjusted_lr)
+
+    # Convert U to match parameter dtype
+    dtype = X[0].dtype
+    U = [u.to(dtype=dtype) for u in U]
 
     # Apply the orthogonalized update to only the selected rows/columns.
     dim = X[0].ndim + select_dim if select_dim < 0 else select_dim
