@@ -157,7 +157,7 @@ class DistributedOrthoBase(Optimizer):
         ``num_heads`` is unset or equals 1 (both are no-ops). Raises
         ``ValueError`` for invalid values or incompatible combinations.
         """
-        num_heads = group.get("num_heads")
+        num_heads = group.get("num_heads") or group.get("num_experts")
         if num_heads is None:
             return None
         # bool is a subclass of int in Python; reject it explicitly.

@@ -53,7 +53,7 @@ class Hyperparameters:
 
     # MoE config
     use_moe: bool = False
-    num_local_experts: int = 8
+    num_experts: int = 8
     num_experts_per_tok: int = 2
     moe_activation: str = "relu_squared"
     moe_intermediate_size: int = None
@@ -160,11 +160,10 @@ def parse_cli_args():
     parser.add_argument("--model_dim", type=int, default=None)
     parser.add_argument("--n_layer", type=int, default=None)
     parser.add_argument("--n_head", type=int, default=None)
-    parser.add_argument("--use_bias", action="store_true", help="Use bias in linear layers")
 
     # ---------- MoE config ----------
     parser.add_argument("--use_moe", action="store_true", help="Use Mixture of Experts")
-    parser.add_argument("--num_local_experts", type=int, default=None, help="Number of experts per MoE layer")
+    parser.add_argument("--num_experts", type=int, default=None, help="Number of experts per MoE layer")
     parser.add_argument("--num_experts_per_tok", type=int, default=None, help="Number of experts per token (top-k)")
     parser.add_argument("--moe_activation", type=str, default=None, choices=["relu_squared", "swiglu"], help="MoE activation function")
     parser.add_argument("--moe_intermediate_size", type=int, default=None, help="MoE FFN intermediate size (default: 4 * model_dim)")
@@ -257,7 +256,6 @@ def parse_cli_args():
             "use_gram_newton_schulz",
             "split_heads",
             "time_optimizer",
-            "use_bias",
             "use_moe",
             "debug",
         ):
@@ -385,7 +383,7 @@ def init_optimizer(
     param_groups.append(qkv_group)
 
     if len(moe_expert_params) > 0:
-        param_groups.append(dict(params=moe_expert_params))
+        param_groups.append(dict(params=moe_expert_params, num_experts=hp.num_experts))
     if len(moe_router_params) > 0:
         param_groups.append(dict(params=moe_router_params))
 
@@ -805,7 +803,7 @@ def main():
     print0(f"Number of layers: {hp.n_layer}")
     print0(f"Number of heads: {hp.n_head}")
     if hp.use_moe:
-        print0(f"Using MoE with {hp.num_local_experts} experts, {hp.num_experts_per_tok} per token")
+        print0(f"Using MoE with {hp.num_experts} experts, {hp.num_experts_per_tok} per token")
 
     gpt_config = GPTConfig(
         sequence_len=hp.sequence_length,
@@ -815,7 +813,7 @@ def main():
         n_embd=hp.model_dim,
         use_bias=hp.use_bias,
         use_moe=hp.use_moe,
-        num_local_experts=hp.num_local_experts,
+        num_experts=hp.num_experts,
         num_experts_per_tok=hp.num_experts_per_tok,
         moe_activation=hp.moe_activation,
         moe_intermediate_size=hp.moe_intermediate_size,

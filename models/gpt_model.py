@@ -24,7 +24,7 @@ class GPTConfig:
     use_bias: bool = False
     # MoE config
     use_moe: bool = False
-    num_local_experts: int = 8
+    num_experts: int = 8
     num_experts_per_tok: int = 2
     moe_activation: str = "relu_squared"
     moe_intermediate_size: Optional[int] = None
@@ -122,25 +122,28 @@ class MLP(nn.Module):
 class MoEExperts(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.num_experts = config.num_local_experts
+        self.num_experts = config.num_experts
         self.hidden_dim = config.n_embd
         self.intermediate_dim = config.moe_intermediate_size or (4 * config.n_embd)
         self.activation = config.moe_activation
 
+        # Store expert weights as 2D tensors: [num_experts * out_dim, in_dim]
+        # This allows the optimizer to use num_experts parameter (like num_heads)
+        # to orthogonalize each expert independently without communication
         if self.activation == "swiglu":
             self.gate_proj = nn.Parameter(
-                torch.empty(self.num_experts, self.intermediate_dim, self.hidden_dim)
+                torch.empty(self.num_experts * self.intermediate_dim, self.hidden_dim)
             )
             self.up_proj = nn.Parameter(
-                torch.empty(self.num_experts, self.intermediate_dim, self.hidden_dim)
+                torch.empty(self.num_experts * self.intermediate_dim, self.hidden_dim)
             )
         else:
             self.c_fc = nn.Parameter(
-                torch.empty(self.num_experts, self.intermediate_dim, self.hidden_dim)
+                torch.empty(self.num_experts * self.intermediate_dim, self.hidden_dim)
             )
 
         self.down_proj = nn.Parameter(
-            torch.empty(self.num_experts, self.hidden_dim, self.intermediate_dim)
+            torch.empty(self.num_experts * self.hidden_dim, self.intermediate_dim)
         )
 
     def forward(self, hidden_states, top_k_index, top_k_weights):
@@ -151,19 +154,24 @@ class MoEExperts(nn.Module):
             expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
 
         for expert_idx in expert_hit:
-            expert_idx = expert_idx[0]
+            expert_idx = expert_idx[0].item()
             top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
             current_state = hidden_states[token_idx]
 
+            # Extract expert slice from 2D weight tensors
             if self.activation == "swiglu":
-                gate = F.linear(current_state, self.gate_proj[expert_idx])
-                up = F.linear(current_state, self.up_proj[expert_idx])
+                gate_weight = self.gate_proj[expert_idx * self.intermediate_dim:(expert_idx + 1) * self.intermediate_dim]
+                up_weight = self.up_proj[expert_idx * self.intermediate_dim:(expert_idx + 1) * self.intermediate_dim]
+                gate = F.linear(current_state, gate_weight)
+                up = F.linear(current_state, up_weight)
                 current_hidden_states = F.silu(gate) * up
             else:
-                current_hidden_states = F.linear(current_state, self.c_fc[expert_idx])
+                fc_weight = self.c_fc[expert_idx * self.intermediate_dim:(expert_idx + 1) * self.intermediate_dim]
+                current_hidden_states = F.linear(current_state, fc_weight)
                 current_hidden_states = F.relu(current_hidden_states).square()
 
-            current_hidden_states = F.linear(current_hidden_states, self.down_proj[expert_idx])
+            down_weight = self.down_proj[expert_idx * self.hidden_dim:(expert_idx + 1) * self.hidden_dim]
+            current_hidden_states = F.linear(current_hidden_states, down_weight)
             current_hidden_states = current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
             final_hidden_states.index_add_(0, token_idx, current_hidden_states.to(final_hidden_states.dtype))
 
@@ -174,7 +182,7 @@ class MoERouter(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.top_k = config.num_experts_per_tok
-        self.num_experts = config.num_local_experts
+        self.num_experts = config.num_experts
         self.hidden_dim = config.n_embd
         self.weight = nn.Parameter(torch.empty(self.num_experts, self.hidden_dim))
 
@@ -248,19 +256,18 @@ class GPT(nn.Module):
             module.init_inv_freq()
 
         elif isinstance(module, MoEExperts):
-            for expert_idx in range(module.num_experts):
-                fan_out = module.intermediate_dim
-                fan_in = module.hidden_dim
-                std = 1.0 / math.sqrt(fan_in) * min(1.0, math.sqrt(fan_out / fan_in))
-                if module.activation == "swiglu":
-                    torch.nn.init.normal_(module.gate_proj[expert_idx], mean=0.0, std=std)
-                    torch.nn.init.normal_(module.up_proj[expert_idx], mean=0.0, std=std)
-                else:
-                    torch.nn.init.normal_(module.c_fc[expert_idx], mean=0.0, std=std)
-                fan_out = module.hidden_dim
-                fan_in = module.intermediate_dim
-                std = 1.0 / math.sqrt(fan_in) * min(1.0, math.sqrt(fan_out / fan_in))
-                torch.nn.init.normal_(module.down_proj[expert_idx], mean=0.0, std=std)
+            fan_out = module.intermediate_dim
+            fan_in = module.hidden_dim
+            std = 1.0 / math.sqrt(fan_in) * min(1.0, math.sqrt(fan_out / fan_in))
+            if module.activation == "swiglu":
+                torch.nn.init.normal_(module.gate_proj, mean=0.0, std=std)
+                torch.nn.init.normal_(module.up_proj, mean=0.0, std=std)
+            else:
+                torch.nn.init.normal_(module.c_fc, mean=0.0, std=std)
+            fan_out = module.hidden_dim
+            fan_in = module.intermediate_dim
+            std = 1.0 / math.sqrt(fan_in) * min(1.0, math.sqrt(fan_out / fan_in))
+            torch.nn.init.normal_(module.down_proj, mean=0.0, std=std)
 
         elif isinstance(module, MoERouter):
             fan_out = module.num_experts
@@ -425,7 +432,7 @@ def _apply_tp(model: GPT, tp_mesh: DeviceMesh):
 
     # Apply TP to transformer layers
     for block in model.transformer.h:
-        # Apply TP to attention
+        # Apply TP
         tp_plan = {
             "attn.c_q": ColwiseParallel(),
             "attn.c_k": ColwiseParallel(),
@@ -433,6 +440,7 @@ def _apply_tp(model: GPT, tp_mesh: DeviceMesh):
             "attn.c_proj": RowwiseParallel(),
         }
 
+        # Add MLP to TP plan only if using standard MLP (not MoE)
         if isinstance(block.mlp, MLP):
             tp_plan["mlp.c_fc"] = ColwiseParallel()
             tp_plan["mlp.c_proj"] = RowwiseParallel()
@@ -465,30 +473,40 @@ def _apply_fsdp(
     for block in model.transformer.h:
         # Apply DP and FS as fully_shard() hybrid sharding
 
+        # Default shard placement when TP is disabled
         shard_placement_fn = None
-        shard_map = {}
 
+        # Shard placement when TP is enabled
         if tp_enabled:
-            shard_map.update({
+            # Shard the opposite dimension as TP
+            # TP ColwiseParallel = Shard(0), so FSDP should use Shard(1)
+            # TP RowwiseParallel = Shard(1), so FSDP should use Shard(0)
+            shard_map = {
                 block.attn.c_q.weight: Shard(1),
                 block.attn.c_k.weight: Shard(1),
                 block.attn.c_v.weight: Shard(1),
                 block.attn.c_proj.weight: Shard(0),
-            })
+            }
             if isinstance(block.mlp, MLP):
                 shard_map[block.mlp.c_fc.weight] = Shard(1)
                 shard_map[block.mlp.c_proj.weight] = Shard(0)
-
-        if isinstance(block.mlp, MoELayer):
-            if hasattr(block.mlp.experts, 'gate_proj'):
-                shard_map[block.mlp.experts.gate_proj] = Shard(0)
-                shard_map[block.mlp.experts.up_proj] = Shard(0)
-            else:
-                shard_map[block.mlp.experts.c_fc] = Shard(0)
-            shard_map[block.mlp.experts.down_proj] = Shard(0)
-
-        if shard_map:
             shard_placement_fn = lambda param: shard_map.get(param)
+
+        # MoE layers: shard experts along expert dimension (Shard(0))
+        if isinstance(block.mlp, MoELayer):
+            expert_shard_map = {}
+            if hasattr(block.mlp.experts, 'gate_proj'):
+                expert_shard_map[block.mlp.experts.gate_proj] = Shard(0)
+                expert_shard_map[block.mlp.experts.up_proj] = Shard(0)
+            else:
+                expert_shard_map[block.mlp.experts.c_fc] = Shard(0)
+            expert_shard_map[block.mlp.experts.down_proj] = Shard(0)
+
+            if tp_enabled:
+                # Combine TP sharding map with expert sharding map
+                shard_placement_fn = lambda param: shard_map.get(param) or expert_shard_map.get(param)
+            else:
+                shard_placement_fn = lambda param: expert_shard_map.get(param)
 
         fully_shard(
             block,
