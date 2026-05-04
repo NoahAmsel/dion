@@ -258,24 +258,15 @@ def dion2_update_megabatch_async(
     else:
         raise ValueError(f"Unknown adjust_lr: {adjust_lr}")
 
-    # # Post-orthogonalize: apply update to selected indices only
-    # dion2_post_orthogonalize(
-    #     X=to_local(X),
-    #     U=U_ortho,
-    #     indices=indices_list,
-    #     base_lr=lr,
-    #     adjusted_lr=adjusted_lr,
-    #     weight_decay=weight_decay,
-    #     select_dim=select_dim,
-    # )
-    # Post-orthogonalize: apply update
-    muon_update_post_orthogonalize(
+    # Post-orthogonalize: apply update to selected indices only
+    dion2_post_orthogonalize(
         X=to_local(X),
         U=U_ortho,
+        indices=indices_list,
         base_lr=lr,
         adjusted_lr=adjusted_lr,
         weight_decay=weight_decay,
-        cautious_wd=False,
+        select_dim=select_dim,
     )
 
 
@@ -392,11 +383,18 @@ def dion2_post_orthogonalize(
     # dtype = X[0].dtype
     # U = [u.to(dtype=dtype) for u in U]
     # Apply weight update
-    neg_lr = -adjusted_lr
-    U_scaled = [neg_lr * u for u in U]
+    # neg_lr = -adjusted_lr
+    # U_scaled = [neg_lr * u for u in U]
     # Convert U to match parameter dtype
-    dtype = X[0].dtype
-    U_scaled = [u.to(dtype=dtype) for u in U_scaled]
+    # dtype = X[0].dtype
+    # U_scaled = [u.to(dtype=dtype) for u in U_scaled]
+
+    # U = torch._foreach_mul(U, adjusted_lr)
+    # torch._foreach_sub_(X, U)
+    U = torch._foreach_mul(U, -adjusted_lr)
+    torch._foreach_add_(X, U)
+    return
+
     # Apply the orthogonalized update to only the selected rows/columns.
     # scatter_add_ accumulates values into positions specified by the index tensor:
     #   x[..., idx_exp[..., i, j], j] += u_scaled[..., i, j]  (for select_dim == -2)
