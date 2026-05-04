@@ -379,9 +379,9 @@ def dion2_post_orthogonalize(
     """
     torch._foreach_mul_(X, 1 - base_lr * weight_decay)
 
-    # # Convert U to match parameter dtype
-    # dtype = X[0].dtype
-    # U = [u.to(dtype=dtype) for u in U]
+    # Convert U to match parameter dtype
+    dtype = X[0].dtype
+    U = [u.to(dtype=dtype) for u in U]
     # Apply weight update
     # neg_lr = -adjusted_lr
     # U_scaled = [neg_lr * u for u in U]
@@ -389,22 +389,12 @@ def dion2_post_orthogonalize(
     # dtype = X[0].dtype
     # U_scaled = [u.to(dtype=dtype) for u in U_scaled]
 
-    # U = torch._foreach_mul(U, adjusted_lr)
-    # torch._foreach_sub_(X, U)
-    U = torch._foreach_mul(U, -adjusted_lr)
-    torch._foreach_add_(X, U)
-    return
+    U_scaled = torch._foreach_mul(U, -adjusted_lr)
 
     # Apply the orthogonalized update to only the selected rows/columns.
-    # scatter_add_ accumulates values into positions specified by the index tensor:
-    #   x[..., idx_exp[..., i, j], j] += u_scaled[..., i, j]  (for select_dim == -2)
-    # where i ranges over the k selected rows and j over all columns.
+    dim = X[0].ndim + select_dim if select_dim < 0 else select_dim
     for x, u_scaled, idx in zip(X, U_scaled, indices):
-        if select_dim == -2:
-            idx_exp = idx.unsqueeze(-1).expand_as(u_scaled)
-        else:
-            idx_exp = idx.unsqueeze(-2).expand_as(u_scaled)
-        x.scatter_add_(dim=select_dim, index=idx_exp, src=u_scaled)
+        x.index_add_(dim, idx, u_scaled)
 
 
 # A helper function to print selection choice for each matrix
