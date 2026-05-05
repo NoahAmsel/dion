@@ -316,17 +316,20 @@ def sweep(name: Optional[str] = None):
     DEFAULT_CONFIG = "configs/benchmark_optimizer.yaml"
 
     SWEEP_OVERRIDES = [
-        {"optimizer": "muon", "no_triton": True, "use_gns_package": False, "use_gns_alg": False, "split_heads": False},
-        {"optimizer": "muon", "use_gns_package": False, "use_gns_alg": False, "split_heads": False},
-        {"optimizer": "muon", "use_gns_package": True, "use_gns_alg": False, "split_heads": False},
-        {"optimizer": "muon", "use_gns_package": True, "use_gns_alg": True, "split_heads": False},
-        {"optimizer": "muon", "use_gns_package": True, "use_gns_alg": True, "split_heads": True},
+        {"override_name": "baseline", "optimizer": "muon", "no_triton": True, "use_gns_package": False, "use_gns_alg": False, "split_heads": False},
+        {"override_name": "+ *triton* kernels", "optimizer": "muon", "use_gns_package": False, "use_gns_alg": False, "split_heads": False},
+        {"override_name": "+ kernels", "optimizer": "muon", "use_gns_package": True, "use_gns_alg": False, "split_heads": False},
+        {"override_name": "+ GNS", "optimizer": "muon", "use_gns_package": True, "use_gns_alg": True, "split_heads": False},
+        {"override_name": "+ split heads", "optimizer": "muon", "use_gns_package": True, "use_gns_alg": True, "split_heads": True},
+        {"override_name": "GNS, split, no kernel", "optimizer": "muon", "no_triton": True, "use_gns_package": True, "use_gns_alg": True, "split_heads": True},
     ] + [
-        {"optimizer": "dion2", "use_gns_package": True, "use_gns_alg": True, "split_heads": True, "ortho_fraction": frac}
+        {"override_name": f"dion {frac}", "optimizer": "dion2", "use_gns_package": True, "use_gns_alg": True, "split_heads": True, "ortho_fraction": frac}
         for frac in (1.0, 0.5, 0.25, 0.125)
     ] + [
-        {"optimizer": "dion2", "use_gns_package": True, "use_gns_alg": True, "split_heads": True, "ortho_fraction": 0.25},
-        {"optimizer": "adamw"},
+        {"override_name": f"dion {frac} no GNS",  "optimizer": "dion2", "use_gns_package": True, "use_gns_alg": False, "split_heads": True, "ortho_fraction": frac}
+        for frac in (1.0, 0.5, 0.25, 0.125)
+    ] + [
+        {"override_name": "adamw", "optimizer": "adamw"},
     ]
 
     cli_args = parse_cli_args()
