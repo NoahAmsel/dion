@@ -300,8 +300,8 @@ def muon_update_post_orthogonalize(
         torch._foreach_mul_(X, 1 - base_lr * weight_decay)
 
     # Weight update
-    U = torch._foreach_mul(U, adjusted_lr)
-    torch._foreach_sub_(X, U)
+    U = torch._foreach_mul(U, -adjusted_lr)
+    torch._foreach_add_(X, U)
 
 
 @torch.compile(fullgraph=True)

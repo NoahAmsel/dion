@@ -96,6 +96,7 @@ def make_dion2(model, process_group, n_head: int, **kwargs):
         use_polar_express=True,
         use_gram_newton_schulz=True,
         **kwargs,
+        muon_mode=False
     )
 
 
