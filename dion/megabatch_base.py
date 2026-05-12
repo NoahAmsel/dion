@@ -170,8 +170,8 @@ class DistributedOrthoBase(Optimizer):
             raise ValueError(
                 f"num_heads must be a positive integer if set, got {num_heads!r}."
             )
-        if num_heads == 1:
-            return None
+        # if num_heads == 1:
+        #     return None
         if group.get("flatten"):
             raise ValueError(
                 "num_heads > 1 is incompatible with flatten=True: flattening "
