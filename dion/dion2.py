@@ -145,13 +145,19 @@ class Dion2(DistributedOrthoBase):
                 states = [self._get_or_initialize_state(p, self._algo_name) for p in params]
                 momentums = [s["momentum"] for s in states]
 
-                if num_heads is not None:
+                ortho_num_heads = None
+                if num_heads is not None and not self._should_defer_head_split(
+                    num_heads, params[0]
+                ):
+                    # Local head split: each rank holds whole heads
                     params, gradients, momentums = self._prepare_head_split(
                         num_heads, params, gradients, momentums
                     )
                     megabatch_args = {**update_args, "process_group": None}
                     shard_dim = None
                 else:
+                    if num_heads is not None:
+                        ortho_num_heads = num_heads
                     is_batch_sharded, is_matrix_sharded, sharded_tensor_dim = (
                         self._get_shard_info(params[0], group)
                     )
@@ -166,6 +172,7 @@ class Dion2(DistributedOrthoBase):
                         G=gradients,
                         M=momentums,
                         shard_dim=shard_dim,
+                        num_heads=ortho_num_heads,
                         **megabatch_args,
                     )
                 )
@@ -188,6 +195,7 @@ def dion2_update_megabatch_async(
     process_group: Optional[ProcessGroup] = None,
     newton_schulz_func: Optional[Callable] = None,
     verbose: bool = False,
+    num_heads: Optional[int] = None,  # Deferred head split (num_heads < world_size)
 ) -> Generator[None, None, None]:
     """
     Mega-batched Dion2 update: processes ALL same-shape parameters in one
@@ -255,6 +263,7 @@ def dion2_update_megabatch_async(
         flatten=flatten,
         epsilon=epsilon,
         global_comm_dim_size=global_comm_dim_size,
+        num_heads=num_heads,
     )
 
     # Compute scaled learning rate
@@ -267,6 +276,11 @@ def dion2_update_megabatch_async(
         adjusted_lr = adjust_lr_rms_norm(lr, X[0].shape, flatten=flatten)
     else:
         raise ValueError(f"Unknown adjust_lr: {adjust_lr}")
+
+    # For Dion2, the deferred head reshape only applies inside NS (via
+    # _newton_schulz_with_heads). Pre-ortho selection and post-ortho
+    # scatter_add_ operate on 2D tensors with 1D indices, so we do NOT
+    # reshape U_ortho or X to 3D here.
 
     # Post-orthogonalize: apply update to selected indices only
     dion2_post_orthogonalize(

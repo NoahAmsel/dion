@@ -346,6 +346,123 @@ class TestNumHeads:
 
 
 # ---------------------------------------------------------------------------
+# Deferred head-split: num_heads=1 mathematical equivalence
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA required")
+class TestDeferredNumHeadsOneEquivalence:
+    """Verify that num_heads=1 is mathematically identical to no num_heads.
+
+    Uses the production GramNewtonSchulz + triton pipeline for realistic
+    coverage.  All tests expect bitwise identity (atol=0).
+    """
+
+    @staticmethod
+    def _make_gns_func():
+        from gram_newton_schulz import GramNewtonSchulz
+
+        _gns = GramNewtonSchulz(
+            ns_use_kernels=True,
+            use_gram_newton_schulz=True,
+            gram_newton_schulz_reset_iterations=[2],
+            compile_kwargs=dict(fullgraph=True, mode="default"),
+        )
+        return lambda X, epsilon=None: _gns(X)
+
+    def test_newton_schulz_with_heads_one_is_identity(self):
+        """``_newton_schulz_with_heads`` with num_heads=1 matches num_heads=None."""
+        from dion.megabatch_base import _newton_schulz_with_heads
+
+        ns_func = self._make_gns_func()
+        torch.manual_seed(42)
+        G = torch.randn(64, 32, device=DEVICE)
+        eps = torch.tensor(1e-7, device=DEVICE)
+
+        result_none = _newton_schulz_with_heads(
+            G.clone(), None, ns_func, flatten=False, epsilon=eps,
+        )
+        result_one = _newton_schulz_with_heads(
+            G.clone(), 1, ns_func, flatten=False, epsilon=eps,
+        )
+        torch.testing.assert_close(result_none, result_one, atol=0, rtol=0)
+
+    def test_newton_schulz_with_heads_one_batched(self):
+        """Batched (3D) input: num_heads=1 still matches num_heads=None."""
+        from dion.megabatch_base import _newton_schulz_with_heads
+
+        ns_func = self._make_gns_func()
+        torch.manual_seed(123)
+        G = torch.randn(4, 64, 32, device=DEVICE)
+        eps = torch.tensor(1e-7, device=DEVICE)
+
+        result_none = _newton_schulz_with_heads(
+            G.clone(), None, ns_func, flatten=False, epsilon=eps,
+        )
+        result_one = _newton_schulz_with_heads(
+            G.clone(), 1, ns_func, flatten=False, epsilon=eps,
+        )
+        torch.testing.assert_close(result_none, result_one, atol=0, rtol=0)
+
+    def test_deferred_head_reshape_shapes(self):
+        """``_deferred_head_reshape`` produces correct shapes."""
+        from dion.megabatch_base import _deferred_head_reshape
+
+        t = torch.randn(64, 32, device=DEVICE)
+        [out] = _deferred_head_reshape([t], num_heads=1)
+        assert out.shape == (1, 64, 32)
+        assert out.data_ptr() == t.data_ptr()
+
+        t4 = torch.randn(32, 16, device=DEVICE)
+        [out4] = _deferred_head_reshape([t4], num_heads=4)
+        assert out4.shape == (4, 8, 16)
+        assert out4.data_ptr() == t4.data_ptr()
+
+    @pytest.mark.parametrize("OptimizerCls,extra_kwargs", [
+        pytest.param("Muon", {}, id="muon"),
+        pytest.param("Muon", {"nesterov": True}, id="muon-nesterov"),
+        pytest.param("NorMuon", {}, id="normuon"),
+        pytest.param("Dion2", {"fraction": 1.0}, id="dion2"),
+    ])
+    def test_optimizer_num_heads_one_matches_no_heads(
+        self, OptimizerCls, extra_kwargs
+    ):
+        """Full optimizer step with num_heads=1 matches the default (no heads) path.
+
+        Uses the production GramNewtonSchulz + triton NS function and bfloat16
+        parameters (the production dtype).  Expects bitwise identity.
+        """
+        import dion
+        Cls = getattr(dion, OptimizerCls)
+        ns_func = self._make_gns_func()
+        torch.manual_seed(42)
+        w = torch.nn.Parameter(
+            torch.randn(64, 128, device=DEVICE, dtype=torch.bfloat16)
+        )
+        w_ref = torch.nn.Parameter(w.data.clone())
+
+        opt = Cls(
+            [{"params": [w], "num_heads": 1}],
+            lr=0.02,
+            newton_schulz_func=ns_func,
+            **extra_kwargs,
+        )
+        opt_ref = Cls(
+            [w_ref],
+            lr=0.02,
+            newton_schulz_func=ns_func,
+            **extra_kwargs,
+        )
+        for step in range(3):
+            torch.manual_seed(100 + step)
+            g = torch.randn_like(w)
+            w.grad = g.clone()
+            w_ref.grad = g.clone()
+            opt.step()
+            opt_ref.step()
+        torch.testing.assert_close(w.data, w_ref.data, atol=0, rtol=0)
+
+
+# ---------------------------------------------------------------------------
 # Mixed param groups (matrix + scalar)
 # ---------------------------------------------------------------------------
 
