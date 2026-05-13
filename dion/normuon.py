@@ -8,6 +8,7 @@ from typing import Callable, Generator, List, Optional, Tuple, Union
 
 from .megabatch_base import (
     DistributedOrthoBase,
+    _deferred_head_reshape,
     megabatch_orthogonalize_async,
     adjust_lr_spectral_norm,
     adjust_lr_rms_norm,
@@ -167,7 +168,11 @@ class NorMuon(DistributedOrthoBase):
                 momentums = [s["momentum"] for s in states]
                 variances_neuron = [s["variance_neuron"] for s in states]
 
-                if num_heads is not None:
+                ortho_num_heads = None
+                if num_heads is not None and not self._should_defer_head_split(
+                    num_heads, params[0]
+                ):
+                    # Local head split: each rank holds whole heads
                     params, gradients, momentums, variances_neuron = (
                         self._prepare_head_split(
                             num_heads, params, gradients, momentums, variances_neuron
@@ -176,6 +181,8 @@ class NorMuon(DistributedOrthoBase):
                     megabatch_args = {**update_args, "process_group": None}
                     shard_dim = None
                 else:
+                    if num_heads is not None:
+                        ortho_num_heads = num_heads
                     is_batch_sharded, is_matrix_sharded, sharded_tensor_dim = (
                         self._get_shard_info(params[0], group)
                     )
@@ -191,6 +198,7 @@ class NorMuon(DistributedOrthoBase):
                         M=momentums,
                         V=variances_neuron,
                         shard_dim=shard_dim,
+                        num_heads=ortho_num_heads,
                         **megabatch_args,
                     )
                 )
@@ -215,6 +223,7 @@ def normuon_update_megabatch_async(
     process_group: Optional[ProcessGroup] = None,
     newton_schulz_func: Optional[Callable] = None,
     cautious_wd: bool = False,
+    num_heads: Optional[int] = None,
 ) -> Generator[None, None, None]:
     """
     Mega-batched NorMuon update: processes ALL same-shape parameters in one
@@ -257,10 +266,21 @@ def normuon_update_megabatch_async(
         flatten=flatten,
         epsilon=epsilon,
         global_comm_dim_size=global_comm_dim_size,
+        num_heads=num_heads,
     )
 
+    # Compute scaled learning rate (before deferred reshape; uses DTensor global shape)
+
+    # Deferred head split: reshape everything to 3D after communication
+    if num_heads is not None:
+        U = _deferred_head_reshape(U, num_heads)
+        X_local = _deferred_head_reshape(to_local(X), num_heads)
+        V_local = _deferred_head_reshape(to_local(V), num_heads)
+    else:
+        X_local = to_local(X)
+        V_local = to_local(V)
+
     # NorMuon normalization using stacked tensors for fewer kernel launches
-    V_local = to_local(V)
     U_stacked = torch.stack(U)
     V_stacked = torch.stack(V_local)
     U_stacked, V_stacked = normuon_normalization_stacked(U_stacked, V_stacked, muon_beta2)
@@ -268,7 +288,6 @@ def normuon_update_megabatch_async(
         V_local[i].copy_(V_stacked[i])
     U = [U_stacked[i] for i in range(N)]
 
-    # Compute scaled learning rate
     if adjust_lr is None:
         adjusted_lr = lr
     elif adjust_lr == "spectral_norm":
@@ -280,7 +299,7 @@ def normuon_update_megabatch_async(
 
     # Post-orthogonalize: apply update
     muon_update_post_orthogonalize(
-        X=to_local(X),
+        X=X_local,
         U=U,
         base_lr=lr,
         adjusted_lr=adjusted_lr,

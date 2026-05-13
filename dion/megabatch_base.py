@@ -157,9 +157,8 @@ class DistributedOrthoBase(Optimizer):
     def _resolve_num_heads(self, group: dict) -> Optional[int]:
         """Validate the ``num_heads`` option on a param group.
 
-        Returns the group's ``num_heads`` when it is set and > 1 (the only case
-        that actually triggers the per-head code path). Returns ``None`` when
-        ``num_heads`` is unset or equals 1 (both are no-ops). Raises
+        Returns the group's ``num_heads`` when it is set and >= 1.
+        Returns ``None`` when ``num_heads`` is unset. Raises
         ``ValueError`` for invalid values or incompatible combinations.
         """
         num_heads = group.get("num_heads")
@@ -170,15 +169,47 @@ class DistributedOrthoBase(Optimizer):
             raise ValueError(
                 f"num_heads must be a positive integer if set, got {num_heads!r}."
             )
-        # if num_heads == 1:
-        #     return None
         if group.get("flatten"):
             raise ValueError(
-                "num_heads > 1 is incompatible with flatten=True: flattening "
+                "num_heads is incompatible with flatten=True: flattening "
                 "the per-head 3D view collapses heads back into a single 2D "
                 "matrix, defeating per-head Newton-Schulz."
             )
         return num_heads
+
+    def _should_defer_head_split(self, num_heads: int, param: Tensor) -> bool:
+        """Return True when the head split must be deferred to after all-gather.
+
+        When ``num_heads`` is smaller than the sharding world size, each head
+        spans multiple ranks and cannot be split locally. In that case the
+        caller should keep the DTensors intact, use the normal sharded
+        communication path, and pass ``num_heads`` into
+        ``megabatch_orthogonalize_async`` so the head reshape happens after
+        the all-to-all gather reconstructs full matrices.
+        """
+        if not isinstance(param, DTensor):
+            return False
+        shard_placements = [
+            (i, p)
+            for i, p in enumerate(param.placements)
+            if p.is_shard() and param.device_mesh.size(i) > 1
+        ]
+        if not shard_placements:
+            return False
+        # Use the actual mesh dim that shards this tensor
+        sharded_mesh_dim = shard_placements[0][0]
+        world = param.device_mesh.size(sharded_mesh_dim)
+        if num_heads % world == 0:
+            return False
+        # Deferred path: validate that world_size divides num_heads evenly
+        # would be required for general num_heads, but for now only
+        # num_heads < world_size is supported (specifically num_heads=1).
+        if world % num_heads != 0:
+            raise ValueError(
+                f"num_heads ({num_heads}) must be divisible by the sharding "
+                f"world_size ({world}), or vice versa."
+            )
+        return True
 
     def _prepare_head_split(
         self,
@@ -354,6 +385,43 @@ class DistributedOrthoBase(Optimizer):
             )
 
 
+def _deferred_head_reshape(tensors: List[Tensor], num_heads: int) -> List[Tensor]:
+    """Reshape 2D local tensors to 3D per-head views for deferred head splitting.
+
+    Produces ``(num_heads, head_dim, cols)`` views matching what
+    ``_prepare_head_split`` would have returned. The returned tensors are
+    views on the same storage so in-place updates propagate.
+    """
+    return [t.unflatten(-2, (num_heads, -1)) for t in tensors]
+
+
+def _newton_schulz_with_heads(
+    X: Tensor,
+    num_heads: Optional[int],
+    newton_schulz_func: Callable,
+    flatten: bool,
+    epsilon: Tensor,
+) -> Tensor:
+    """Run Newton-Schulz, optionally reshaping to per-head 3D view first.
+
+    When ``num_heads`` is not None, unflatten the second-to-last dimension
+    into ``(num_heads, head_dim)`` before NS and flatten it back afterwards.
+    ``muon_update_newton_schulz`` already handles 4D by flattening leading
+    dims, so each head is orthogonalized independently.
+    """
+    if num_heads is not None:
+        X = X.unflatten(-2, (num_heads, -1))
+    X = muon_update_newton_schulz(
+        X,
+        newton_schulz_func=newton_schulz_func,
+        flatten=flatten,
+        epsilon=epsilon,
+    )
+    if num_heads is not None:
+        X = X.flatten(-3, -2)
+    return X
+
+
 def megabatch_orthogonalize_async(
     U: List[Tensor],
     comm_dim: Optional[int],
@@ -364,6 +432,7 @@ def megabatch_orthogonalize_async(
     flatten: bool,
     epsilon: Tensor,
     global_comm_dim_size: Optional[int],
+    num_heads: Optional[int] = None,
 ) -> Generator[None, None, List[Tensor]]:
     """
     Shared megabatch communication + Newton-Schulz orthogonalization.
@@ -390,6 +459,10 @@ def megabatch_orthogonalize_async(
             (``param.shape[comm_dim]``). Used to compute
             ``padded_local_size = ceil(global / world_size)`` so the
             alltoall sees uniform per-pair sizes across ranks.
+        num_heads: When set, reshape gathered matrices to add a head
+            dimension before Newton-Schulz and flatten it back afterwards.
+            This is used for "deferred" head splitting when ``num_heads``
+            is smaller than the sharding world size.
     """
     N = len(U)
 
@@ -456,8 +529,9 @@ def megabatch_orthogonalize_async(
 
         # comm_dim is negative, so it correctly indexes the stacked tensor
         full_matrices = torch.cat(output_chunks, dim=comm_dim)
-        full_matrices = muon_update_newton_schulz(
+        full_matrices = _newton_schulz_with_heads(
             full_matrices,
+            num_heads=num_heads,
             newton_schulz_func=newton_schulz_func,
             flatten=flatten,
             epsilon=epsilon,
@@ -488,8 +562,9 @@ def megabatch_orthogonalize_async(
         # --- Mega-batched non-sharded path ---
         start = device_rank * per_rank
         my_matrices = torch.stack(U_work[start : start + per_rank])
-        my_matrices = muon_update_newton_schulz(
+        my_matrices = _newton_schulz_with_heads(
             my_matrices,
+            num_heads=num_heads,
             newton_schulz_func=newton_schulz_func,
             flatten=flatten,
             epsilon=epsilon,
@@ -507,8 +582,9 @@ def megabatch_orthogonalize_async(
 
     elif N == 1:
         return [
-            muon_update_newton_schulz(
+            _newton_schulz_with_heads(
                 U[0],
+                num_heads=num_heads,
                 newton_schulz_func=newton_schulz_func,
                 flatten=flatten,
                 epsilon=epsilon,
@@ -518,8 +594,9 @@ def megabatch_orthogonalize_async(
     else:
         # N > 1, no process_group (single GPU or batch-sharded 3D)
         stacked = torch.stack(U)
-        stacked = muon_update_newton_schulz(
+        stacked = _newton_schulz_with_heads(
             stacked,
+            num_heads=num_heads,
             newton_schulz_func=newton_schulz_func,
             flatten=flatten,
             epsilon=epsilon,

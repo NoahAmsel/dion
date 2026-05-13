@@ -8,6 +8,7 @@ from typing import Callable, Generator, List, Optional, Tuple, Union
 
 from .megabatch_base import (
     DistributedOrthoBase,
+    _deferred_head_reshape,
     megabatch_orthogonalize_async,
     muon_update_newton_schulz,
     adjust_lr_spectral_norm,
@@ -143,13 +144,19 @@ class Muon(DistributedOrthoBase):
                 states = [self._get_or_initialize_state(p, "muon") for p in params]
                 momentums = [s["momentum"] for s in states]
 
-                if num_heads is not None:
+                ortho_num_heads = None
+                if num_heads is not None and not self._should_defer_head_split(
+                    num_heads, params[0]
+                ):
+                    # Local head split: each rank holds whole heads
                     params, gradients, momentums = self._prepare_head_split(
                         num_heads, params, gradients, momentums
                     )
                     megabatch_args = {**update_args, "process_group": None}
                     shard_dim = None
                 else:
+                    if num_heads is not None:
+                        ortho_num_heads = num_heads
                     is_batch_sharded, is_matrix_sharded, sharded_tensor_dim = (
                         self._get_shard_info(params[0], group)
                     )
@@ -164,6 +171,7 @@ class Muon(DistributedOrthoBase):
                         G=gradients,
                         M=momentums,
                         shard_dim=shard_dim,
+                        num_heads=ortho_num_heads,
                         **megabatch_args,
                     )
                 )
@@ -186,6 +194,7 @@ def muon_update_megabatch_async(
     process_group: Optional[ProcessGroup] = None,
     newton_schulz_func: Optional[Callable] = None,
     cautious_wd: bool = False,
+    num_heads: Optional[int] = None,
 ) -> Generator[None, None, None]:
     """
     Mega-batched Muon update: processes ALL same-shape parameters in one
@@ -228,6 +237,7 @@ def muon_update_megabatch_async(
         flatten=flatten,
         epsilon=epsilon,
         global_comm_dim_size=global_comm_dim_size,
+        num_heads=num_heads,
     )
 
     # Compute scaled learning rate
@@ -240,9 +250,16 @@ def muon_update_megabatch_async(
     else:
         raise ValueError(f"Unknown adjust_lr value: {adjust_lr}")
 
+    # Deferred head split: reshape everything to 3D after communication
+    if num_heads is not None:
+        U = _deferred_head_reshape(U, num_heads)
+        X = _deferred_head_reshape(to_local(X), num_heads)
+    else:
+        X = to_local(X)
+
     # Post-orthogonalize: apply update
     muon_update_post_orthogonalize(
-        X=to_local(X),
+        X=X,
         U=U,
         base_lr=lr,
         adjusted_lr=adjusted_lr,
