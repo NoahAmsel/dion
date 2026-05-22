@@ -105,6 +105,7 @@ class DistributedOrthoBase(Optimizer):
                     "use_triton=True requires the 'triton' package, which is not installed. "
                     "Install it with: pip install dion[triton]  (or: pip install triton)"
                 )
+            assert not use_gns_alg, "use_gns_alg=True requires use_gns_package=True"
             self._newton_schulz_func = self._NATIVE_NS_FUNCS[
                 (use_polar_express, use_triton)
             ]

@@ -746,6 +746,29 @@ def main():
         fs_size=cli_args.fs_size,
         tp_size=cli_args.tp_size,
     )
+
+    train(hp, cli_args, device_mesh)
+    dist.destroy_process_group()
+
+
+def train(hp: Hyperparameters, cli_args: argparse.Namespace, device_mesh: Optional[DeviceMesh]) -> dict:
+    """
+    Run the full training loop.
+
+    Args:
+        hp: Training hyperparameters.
+        cli_args: Parsed CLI arguments namespace.
+        device_mesh: Pre-initialized DeviceMesh, or None for DDP mode.
+
+    Returns:
+        Dict with timing and loss metrics:
+            - training_time_ms: Total training wall-clock time (excluding validation).
+            - avg_step_ms: Average time per step (after warmup).
+            - avg_fwd_bwd_ms: Average forward+backward time (if time_optimizer enabled).
+            - avg_opt_ms: Average optimizer step time (if time_optimizer enabled).
+            - final_val_loss: Last computed validation loss.
+            - peak_memory_mb: Peak GPU memory usage in MiB.
+    """
     print0("=" * 80)
 
     # --- DataLoader Setup ---
@@ -979,6 +1002,7 @@ def main():
     training_time_ms = 0
     total_fwd_bwd_ms = 0
     total_opt_ms = 0
+    val_loss = None
     torch.cuda.synchronize()
     t0 = time.perf_counter()
 
@@ -1127,10 +1151,21 @@ def main():
             checkpoint_manager.save(step=step)
 
     pbar.close()
-    print0(
-        f"Peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB"
-    )
-    dist.destroy_process_group()
+    peak_memory_mb = torch.cuda.max_memory_allocated() // 1024 // 1024
+    print0(f"Peak memory consumption: {peak_memory_mb} MiB")
+
+    # Build results dict
+    results = {
+        "training_time_ms": training_time_ms,
+        "avg_step_ms": training_time_ms / timed_steps if timed_steps > 0 else float("nan"),
+        "final_val_loss": val_loss,
+        "peak_memory_mb": peak_memory_mb,
+    }
+    if cli_args.time_optimizer and timed_steps > 0:
+        results["avg_fwd_bwd_ms"] = total_fwd_bwd_ms / timed_steps
+        results["avg_opt_ms"] = total_opt_ms / timed_steps
+
+    return results
 
 
 if __name__ == "__main__":

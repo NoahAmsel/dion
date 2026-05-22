@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-Benchmark the optimizer step in isolation (no forward/backward pass).
+Benchmark optimizer and training performance.
 
 Usage:
-  # Single GPU (DDP with world_size=1):
+  # Benchmark optimizer step in isolation (no forward/backward):
   CUDA_VISIBLE_DEVICES=3 torchrun --standalone --nproc_per_node=1 benchmark_optimizer.py --config configs/dion2_160m.yaml
-
-  # Multi-GPU with FSDP:
   torchrun --standalone --nproc_per_node=4 benchmark_optimizer.py --config configs/dion2_160m.yaml --fs_size 4
+
+  # Benchmark full training steps (forward + backward + optimizer):
+  torchrun --standalone --nproc_per_node=4 benchmark_optimizer.py full --config configs/dion2_160m.yaml --fs_size 4
 
   # Sweep across configurations:
   CUDA_VISIBLE_DEVICES=3 torchrun --standalone --nproc_per_node=1 benchmark_optimizer.py sweep --name benchmark_results/timing_sweep
   torchrun --standalone --nproc_per_node=4 benchmark_optimizer.py sweep --fs_size 4 --config configs/muon_160m.yaml --name benchmark_results/timing_sweep
 
-  # Programmatic sweep (from another script):
-  from benchmark_optimizer import build_and_benchmark, init_distributed_benchmark
+  # Programmatic API (from another script):
+  from benchmark_optimizer import build_and_benchmark, benchmark_training, init_distributed_benchmark
   device_mesh = init_distributed_benchmark(dp_size=None, fs_size=None, tp_size=None)
   result = build_and_benchmark(config="configs/dion2_160m.yaml", overrides={"ortho_fraction": 0.5}, device_mesh=device_mesh)
+  result = benchmark_training(config="configs/dion2_160m.yaml", device_mesh=device_mesh, num_iterations=100)
 """
 
 import argparse
@@ -40,6 +42,7 @@ from train import (
     override_args_from_cli,
     init_optimizer,
     print0,
+    train,
 )
 
 
@@ -176,6 +179,77 @@ def benchmark_optimizer_step(
     return median_ms, times_ms
 
 
+def _build_cli_args_and_hp(
+    config: Optional[str] = None,
+    overrides: Optional[dict] = None,
+    cli_defaults: Optional[dict] = None,
+    hp_overrides: Optional[dict] = None,
+) -> tuple:
+    """
+    Shared helper: build cli_args namespace and Hyperparameters from config + overrides.
+
+    Args:
+        config: Path to YAML config file.
+        overrides: Dict applied to cli_args (same as CLI flags).
+        cli_defaults: Dict of non-standard defaults for cli_args boolean/value fields.
+                      E.g. {"no_compile": True, "time_optimizer": True}.
+        hp_overrides: Dict applied directly to hp after construction.
+
+    Returns:
+        (hp, cli_args) tuple.
+    """
+    # Build a namespace that mimics CLI args with standard defaults
+    cli_args = argparse.Namespace(
+        config=config,
+        dp_size=None, fs_size=None, tp_size=None,
+        data_dir=None, checkpoint_dir=None, checkpoint_freq=None,
+        optimizer=None, scalar_opt=None, lr=None, adjust_lr=None,
+        qr_method=None, mixed_precision=False, ortho_fraction=None,
+        mu=None, weight_decay=None, time_optimizer=False,
+        model_dim=None, n_layer=None, n_head=None, vocab_size=None,
+        num_iterations=None, batch_size=None, device_batch_size=None,
+        sequence_length=None, warmup_ratio=None, warmdown_ratio=None,
+        no_wandb=True, wandb_project_name=None, wandb_job_name=None,
+        replicate_mesh_grad_sync=False, fast_fsdp=False,
+        debug=False, no_compile=False, no_triton=False, no_triton_post_orthogonalize=False,
+        use_polar_express=False, use_gns_package=False, use_gns_alg=False,
+        split_heads=False,
+    )
+
+    # Apply caller-specified defaults (before YAML/overrides so they can be overridden)
+    if cli_defaults:
+        for k, v in cli_defaults.items():
+            setattr(cli_args, k, v)
+
+    # Load YAML config if provided
+    if config:
+        from pathlib import Path
+        import yaml
+        with Path(config).open("r") as f:
+            yaml_cfg = yaml.safe_load(f)
+        for k, v in yaml_cfg.items():
+            if hasattr(cli_args, k) and getattr(cli_args, k) is None:
+                setattr(cli_args, k, v)
+            elif hasattr(cli_args, k) and isinstance(getattr(cli_args, k), bool) and not getattr(cli_args, k):
+                if yaml_cfg.get(k, False):
+                    setattr(cli_args, k, True)
+
+    # Apply overrides (highest priority)
+    if overrides:
+        for k, v in overrides.items():
+            setattr(cli_args, k, v)
+
+    hp = Hyperparameters()
+    hp = override_args_from_cli(hp, cli_args)
+
+    # Apply direct hp overrides
+    if hp_overrides:
+        for k, v in hp_overrides.items():
+            setattr(hp, k, v)
+
+    return hp, cli_args
+
+
 def build_and_benchmark(
     config: Optional[str] = None,
     overrides: Optional[dict] = None,
@@ -199,45 +273,12 @@ def build_and_benchmark(
     Note: Distributed must already be initialized before calling this.
           Call init_distributed_benchmark() first.
     """
-    # Build a namespace that mimics CLI args
-    cli_args = argparse.Namespace(
+    hp, cli_args = _build_cli_args_and_hp(
         config=config,
-        dp_size=None, fs_size=None, tp_size=None,
-        data_dir=None, checkpoint_dir=None, checkpoint_freq=None,
-        optimizer=None, scalar_opt=None, lr=None, adjust_lr=None,
-        qr_method=None, mixed_precision=False, ortho_fraction=None,
-        mu=None, weight_decay=None, time_optimizer=False,
-        model_dim=None, n_layer=None, n_head=None, vocab_size=None,
-        num_iterations=None, batch_size=None, device_batch_size=None,
-        sequence_length=None, warmup_ratio=None, warmdown_ratio=None,
-        no_wandb=True, wandb_project_name=None, wandb_job_name=None,
-        replicate_mesh_grad_sync=False, fast_fsdp=False,
-        debug=False, no_compile=True, no_triton=False, no_triton_post_orthogonalize=False,
-        use_polar_express=False, use_gns_package=False, use_gns_alg=False, 
-        split_heads=False,
+        overrides=overrides,
+        # Disable torch.compile: irrelevant for isolated optimizer step timing
+        cli_defaults={"no_compile": True},
     )
-
-    # Load YAML config if provided
-    if config:
-        from pathlib import Path
-        import yaml
-        with Path(config).open("r") as f:
-            yaml_cfg = yaml.safe_load(f)
-        for k, v in yaml_cfg.items():
-            if hasattr(cli_args, k) and getattr(cli_args, k) is None:
-                setattr(cli_args, k, v)
-            elif hasattr(cli_args, k) and isinstance(getattr(cli_args, k), bool) and not getattr(cli_args, k):
-                # Handle store_true flags from YAML
-                if yaml_cfg.get(k, False):
-                    setattr(cli_args, k, True)
-
-    # Apply overrides
-    if overrides:
-        for k, v in overrides.items():
-            setattr(cli_args, k, v)
-
-    hp = Hyperparameters()
-    hp = override_args_from_cli(hp, cli_args)
 
     model, optimizer = build_model_and_optimizer(hp, cli_args, device_mesh)
     num_params = sum(p.numel() for p in model.parameters())
@@ -254,6 +295,45 @@ def build_and_benchmark(
         "gpu_name": torch.cuda.get_device_name(0),
         "num_gpus": dist.get_world_size() if dist.is_initialized() else 1,
     }
+
+
+def benchmark_training(
+    config: Optional[str] = None,
+    overrides: Optional[dict] = None,
+    device_mesh: Optional[DeviceMesh] = None,
+    num_iterations: int = 100,
+) -> dict:
+    """
+    Benchmark full training steps (forward + backward + optimizer) using train.py's loop.
+
+    Args:
+        config: Path to YAML config file (same as train.py --config).
+        overrides: Dict of hyperparameter overrides (e.g. {"model_dim": 768}).
+        device_mesh: Pre-initialized DeviceMesh, or None for DDP mode.
+        num_iterations: Number of training steps to run.
+
+    Returns:
+        Dict with timing metrics from train():
+            - training_time_ms, avg_step_ms, avg_fwd_bwd_ms, avg_opt_ms,
+              final_val_loss, peak_memory_mb.
+
+    Note: Distributed must already be initialized before calling this.
+          Call init_distributed_benchmark() first.
+    """
+    hp, cli_args = _build_cli_args_and_hp(
+        config=config,
+        overrides=overrides,
+        cli_defaults={"time_optimizer": True},
+        hp_overrides={
+            "num_iterations": num_iterations,
+            "val_loss_every": 0,
+            "checkpoint_freq": 0,
+        },
+    )
+
+    torch._dynamo.config.cache_size_limit = 100
+    results = train(hp, cli_args, device_mesh)
+    return results
 
 
 def main():
@@ -467,6 +547,50 @@ def profile():
         dist.destroy_process_group()
 
 
+def full():
+    """
+    Benchmark full training steps (forward + backward + optimizer).
+
+    Usage:
+      torchrun --standalone --nproc_per_node=1 benchmark_optimizer.py full --config configs/dion2_160m.yaml
+      torchrun --standalone --nproc_per_node=4 benchmark_optimizer.py full --config configs/dion2_160m.yaml --fs_size 4
+    """
+    cli_args = parse_cli_args()
+
+    device_mesh = init_distributed_benchmark(
+        dp_size=cli_args.dp_size,
+        fs_size=cli_args.fs_size,
+        tp_size=cli_args.tp_size,
+    )
+
+    print0("=" * 80)
+    print0("Full Training Benchmark (100 steps)")
+    print0(f"GPU: {torch.cuda.get_device_name(0)}")
+    print0("=" * 80)
+
+    overrides = {k: v for k, v in vars(cli_args).items() if v is not None and k != "config"}
+    results = benchmark_training(
+        config=cli_args.config,
+        overrides=overrides,
+        device_mesh=device_mesh,
+        num_iterations=100,
+    )
+
+    print0(f"\nResults (100 training steps):")
+    print0(f"  Total training time: {results['training_time_ms']:.1f} ms")
+    print0(f"  Avg step time:       {results['avg_step_ms']:.3f} ms")
+    if "avg_fwd_bwd_ms" in results:
+        print0(f"  Avg fwd+bwd time:    {results['avg_fwd_bwd_ms']:.3f} ms")
+        print0(f"  Avg optimizer time:  {results['avg_opt_ms']:.3f} ms")
+    print0(f"  Peak memory:         {results['peak_memory_mb']} MiB")
+    if results["final_val_loss"] is not None:
+        print0(f"  Final val loss:      {results['final_val_loss']:.4f}")
+    print0("=" * 80)
+
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "sweep":
@@ -482,5 +606,8 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] == "profile":
         sys.argv.pop(1)
         profile()
+    elif len(sys.argv) > 1 and sys.argv[1] == "full":
+        sys.argv.pop(1)
+        full()
     else:
         main()
