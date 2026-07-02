@@ -50,7 +50,7 @@ Our implementations are available as a `pip` package! Install to use in your pro
 pip install git+https://github.com/microsoft/dion.git
 ```
 
-> The optional Gram Newton-Schulz orthogonalization kernels (enabled with `use_gram_newton_schulz=True`) are not pulled in by the base install. Add them with `pip install "dion[gram-newton-schulz] @ git+https://github.com/microsoft/dion.git"`, or `pip install -e ".[gram-newton-schulz]"` from a clone. Note: this extra pins `nvidia-cutlass-dsl==4.4.2`, which conflicts with Flash-Attention-4 / Blackwell stacks built on cutlass `4.5.2`, so install it in a separate environment if you need both.
+> The optional Gram Newton-Schulz orthogonalization kernels (enabled with `use_gram_newton_schulz=True`) are not pulled in by the base install. Add them with `pip install "dion[gram-newton-schulz] @ git+https://github.com/microsoft/dion.git"`, or `pip install -e ".[gram-newton-schulz]"` from a clone. Note: this extra pins `nvidia-cutlass-dsl==4.5.2`, matching the cutlass version used by current Flash-Attention-4 / Blackwell stacks (the earlier `4.4.2` conflict no longer applies).
 
 Then in your code, you can use:
 
@@ -68,7 +68,7 @@ git clone https://github.com/microsoft/dion.git
 cd dion
 pip install -e .[train]
 ```
-> `train` stays free of the Gram Newton-Schulz kernels (and their `nvidia-cutlass-dsl==4.4.2` pin) so the default training install works on Flash-Attention-4 / Blackwell stacks. To train with `--use_gram_newton_schulz`, use `pip install -e ".[train,gns]"` in a separate environment. Likewise, to develop or test the Gram Newton-Schulz path, install `pip install -e ".[dev,gns]"` — a plain `[dev]` install skips the GNS-specific test cases.
+> `train` stays free of the Gram Newton-Schulz kernels, which remain an opt-in extra. To train with `--use_gram_newton_schulz`, use `pip install -e ".[train,gns]"`; the extra's `nvidia-cutlass-dsl==4.5.2` pin now matches Flash-Attention-4 / Blackwell stacks, so the two no longer conflict. Likewise, to develop or test the Gram Newton-Schulz path, install `pip install -e ".[dev,gns]"` — a plain `[dev]` install skips the GNS-specific test cases.
 
 Download pretokenized FineWeb dataset:
 ```bash
@@ -183,7 +183,7 @@ The details of parameter grouping are dependent on model architecture and implem
 * Biases in `nn.Linear` layers (if used) are one-dimensional vectors, which must be placed into a separate parameter group from the weight matrices. Use Lion or AdamW.
 * Normalization layers (e.g. `nn.LayerNorm`, `nn.RMSNorm`) may contain vectors of learnable weights. Use Lion or AdamW.
 * Embedding layers (e.g. `nn.Embedding`) are stored as 2D tensors, but should be treated as a collection of 1D vectors using Lion or AdamW. (Warning: using Dion here will run without error, but will give poor performance.)
-* Unembedding layers (e.g. LM head) are typically implemented as a `nn.Linear` layer, but shoud also be treated as a collection of 1D vectors. Furthermore, they should use a **smaller scaled learning rate**. It is very important to manually identify this layer and place it into its own parameter group, as it is otherwise indistinguishable from weight matrices!
+* Unembedding layers (e.g. LM head) are typically implemented as a `nn.Linear` layer, but shoud also be treated as a collection of 1D vectors. When using Lion as the scalar optimizer, they should use a **smaller scaled learning rate**; with AdamW, use the base learning rate unless you intentionally tune a separate AdamW learning rate. It is very important to manually identify this layer and place it into its own parameter group, as it is otherwise indistinguishable from weight matrices!
 (Warning: using Dion here will run without error, but will give poor performance.)
 * Convolution layers typically use parameter tensors with 3+ dimensions. These are currently not supported for Dion. Support for convolution layers in Muon is experimental, and can be enabled with the option `flatten=True` to automatically flatten them to 2D matrices when computing the optimizer update.
 
@@ -195,7 +195,8 @@ We summarize the above in this table. Let `d_in` be the input dimension of the u
 | Bias vector   | `nn.Linear.bias`                            | `"adamw"` / `"lion"`  | `lr`                   |
 | Normalization | `nn.LayerNorm.weight`, `nn.LayerNorm.bias`  | `"adamw"` / `"lion"`  | `lr`                   |
 | Embedding     | `nn.Embedding.weight`                       | `"adamw"` / `"lion"`  | `lr`                   |
-| Unembedding   | `nn.Linear.weight` (must identify manually) | `"adamw"` / `"lion"`  | `lr / math.sqrt(d_in)` |
+| Unembedding   | `nn.Linear.weight` (must identify manually) | `"adamw"`             | `lr`                   |
+| Unembedding   | `nn.Linear.weight` (must identify manually) | `"lion"`              | `lr / math.sqrt(d_in)` |
 
 We emphasize again that **particular care** needs to be taken with **embedding and unembedding layers**. They must be isolated from ordinary matrix parameters, and the unembedding layer furthermore should use a scaled learning rate. Merely checking the dimensions of a parameter (such as `if p.ndim == 2`) or the type of the module (such as `if isinstance(module, nn.Linear)`) **is not sufficient** to identify these special parameters. This is why we require manual parameter group creation.
 
@@ -223,12 +224,12 @@ param_groups = [
     dict(params=matrix_params),  # will default to "dion" algorithm
     dict(params=vector_params, algorithm="adamw"),
     dict(params=embed_params, algorithm="adamw"),
-    dict(params=lm_head_params, algorithm="adamw", lr=lr / math.sqrt(model_dim))
+    dict(params=lm_head_params, algorithm="adamw")
 ]
 
 optimizer = Dion2(
     param_groups,
-    lr=lr,  # used for all param groups except for lm_head_params
+    lr=lr,  # used for all param groups without an explicit override
     weight_decay=0.1,  # default setting for all param groups
     ...
 )
@@ -240,7 +241,7 @@ param_groups = [
     dict(params=matrix_params),
     dict(params=vector_params, algorithm="adamw"),
     dict(params=embed_params, algorithm="adamw", weight_decay=0),
-    dict(params=lm_head_params, algorithm="adamw", lr=lr / math.sqrt(model_dim), weight_decay=0)
+    dict(params=lm_head_params, algorithm="adamw", weight_decay=0)
 ]
 ```
 
@@ -262,6 +263,22 @@ param_groups = [
 When `num_heads > 1`, the optimizer views each 2D weight as a batch of `num_heads` matrices of shape `(head_dim, in_features)` internally. The learning-rate adjustment (`spectral_norm` / `rms_norm`) is computed per-head, and Newton-Schulz runs on each head independently. With FSDP, sharding dim 0 along head boundaries (i.e. `num_heads % world_size == 0`) avoids the all-to-all that would otherwise be needed to assemble the fused matrix before NS.
 
 Requirements: the parameter must be 2D, `num_heads` must divide dim 0, and when using FSDP it must also divide the world size. Place Q / K / V / gate projections in one group (axis-0 heads); O-projection heads are on axis 1 and are not covered by this option.
+
+### Per-Block Newton-Schulz for Fused QKV Projections
+
+A fused QKV weight of shape `(q_dim + kv_dim + kv_dim, in_features)` keeps the model on a single wide GEMM, but orthogonalizing it as one matrix blends the Q, K, and V projections — and unlike per-head splitting, the blocks may have unequal sizes under grouped-query attention. Muon and NorMuon can run Newton-Schulz independently per row block by setting `split_sizes` on the parameter group:
+
+```python
+param_groups = [
+    dict(params=fused_qkv_params, split_sizes=(q_dim, kv_dim, kv_dim)),
+    dict(params=other_matrix_params),
+    ...
+]
+```
+
+Each block receives the same update it would as a separate parameter: Newton-Schulz, the learning-rate adjustment (`spectral_norm` / `rms_norm`), and NorMuon's norm-preserving rescale are all computed per block. Blocks of equal size (e.g. K and V) are batched into one Newton-Schulz call. The split happens on the fully assembled matrices after the FSDP all-to-all, so the communication pattern is unchanged from the fused parameter.
+
+Requirements: the parameter must be 2D, `split_sizes` must sum to dim 0, and with FSDP dim 0 must be divisible by the world size (so the assembled matrices contain no padding rows). `split_sizes` is mutually exclusive with `num_heads`. With FSDP, NorMuon's norm-preserving rescale operates on local shards (the existing distributed behavior) rather than per block.
 
 ## Distributed Training Configuration
 
