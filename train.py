@@ -1,5 +1,4 @@
 import argparse
-import math
 import os
 import shutil
 import time
@@ -30,6 +29,7 @@ from dion import MuonReference
 from dion import Dion2
 from dion import NorMuon
 from dion import NorDion2
+from dion.opt_utils import lm_head_lr_scale
 
 
 @dataclass
@@ -379,11 +379,12 @@ def init_optimizer(
             weight_decay=0,  # no weight decay for biases or embedding parameters
         )
     )
+    lm_head_lr = hp.lr * lm_head_lr_scale(hp.scalar_opt, hp.model_dim)
     param_groups.append(
         dict(
             params=lm_head_params,
             algorithm=hp.scalar_opt,
-            lr=hp.lr / math.sqrt(hp.model_dim),  # scale LR for lm_head
+            lr=lm_head_lr,
             betas=(0.95, 0.98),
             weight_decay=0,  # no weight decay for lm_head parameters
         )
@@ -567,7 +568,8 @@ def init_optimizer(
             muon_beta2=0.95,
             weight_decay=hp.weight_decay,
             adjust_lr=hp.adjust_lr,
-            use_gram_newton_schulz=cli_args.use_gram_newton_schulz,
+            use_gns_package=cli_args.use_gns_package,
+            use_gns_alg=cli_args.use_gns_alg,
             use_triton=(not cli_args.no_triton),
             use_polar_express=cli_args.use_polar_express,
             triton_post_ortho=(not cli_args.no_triton),
