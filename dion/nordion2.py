@@ -46,7 +46,8 @@ class NorDion2(DistributedOrthoBase):
         flatten: Whether to flatten 3D+ tensors to 2D for Muon updates.
             True: Tensors with 3+ dimensions are flattened to 2D. Use this for convolutional layers.
             False: Tensors are not flattened. 3D+ tensors are treated as batches of 2D matrices.
-        use_gram_newton_schulz: Whether to use Gram Newton-Schulz for orthogonalization.
+        use_gns_package: Whether to use the gram-newton-schulz package for orthogonalization.
+        use_gns_alg: Whether to use the Gram Newton-Schulz algorithm (requires use_gns_package=True).
         use_triton: Whether to use Triton kernel for Newton-Schulz. Ignored if custom function is provided.
         newton_schulz_func: Use a custom Newton-Schulz function for orthogonalization.
             Signature is ``func(input: Tensor, epsilon: float) -> Tensor``.
@@ -75,7 +76,8 @@ class NorDion2(DistributedOrthoBase):
         flatten: bool = False,
         use_triton: bool = False,
         use_polar_express: bool = True,
-        use_gram_newton_schulz: bool = False,
+        use_gns_package: bool = False,
+        use_gns_alg: bool = False,
         newton_schulz_func: Optional[Callable] = None,
         triton_post_ortho: bool = False,
         selection_scope: str = "global",
@@ -117,7 +119,8 @@ class NorDion2(DistributedOrthoBase):
         )
         super().__init__(
             params, distributed_mesh, "nordion2", defaults,
-            use_gram_newton_schulz=use_gram_newton_schulz,
+            use_gns_package=use_gns_package,
+            use_gns_alg=use_gns_alg,
             use_triton=use_triton,
             use_polar_express=use_polar_express,
             newton_schulz_func=newton_schulz_func,
