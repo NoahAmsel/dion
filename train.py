@@ -134,6 +134,14 @@ def parse_cli_args():
         help="Adjust learning rate method for Muon",
     )
     parser.add_argument(
+        "--selection_scope",
+        type=str,
+        default=None,
+        choices=["local", "global", "global_capped"],
+        help="Dion2/NorDion2 row-selection scope (requires a dion build with "
+        "selection_scope, e.g. microsoft/dion#99). Omit to use dion's default.",
+    )
+    parser.add_argument(
         "--qr_method", type=str, default=None, choices=["qr", "cqr", "rcqr"]
     )
     parser.add_argument(
@@ -213,6 +221,10 @@ def parse_cli_args():
     )
     parser.add_argument(
         "--use_polar_express", action="store_true", help="Use Polar Express for orthogonalization"
+    )
+    parser.add_argument(
+        "--use_gram_newton_schulz", action="store_true",
+        help="dion-internal Gram-NS (NorDion2; dion builds GramNewtonSchulz itself)"
     )
     parser.add_argument(
         "--use_gns_package", action="store_true", help="Use the gram-newton-schulz package for orthogonalization"
@@ -363,8 +375,10 @@ def init_optimizer(
     # Matrix params use optimizer default settings
     param_groups = [dict(params=other_matrix_params)]
 
-    # QKV projections: full orthogonalization, no LR adjustment
-    qkv_group = dict(params=qkv_params, fraction=1.0, adjust_lr=None)
+    # QKV projections: selected at ortho_fraction like other matrices, no LR
+    # adjustment. (Previously fraction=1.0 full orthogonalization, which
+    # exempted qkv from selection and skewed selection-scope comparisons.)
+    qkv_group = dict(params=qkv_params, fraction=hp.ortho_fraction, adjust_lr=None)
     if hp.split_heads:
         qkv_group["num_heads"] = hp.n_head
     param_groups.append(qkv_group)
@@ -497,6 +511,10 @@ def init_optimizer(
         print0(f"Triton Newton-Schulz kernels: {not cli_args.no_triton}")
         print0(f"Triton post-orthogonalize: {not cli_args.no_triton_post_orthogonalize}")
         print0(f"Distributed Dion2 using: {comm_method}")
+        scope_kwargs = {}
+        if cli_args.selection_scope is not None:
+            scope_kwargs["selection_scope"] = cli_args.selection_scope
+            print0(f"Dion2 selection scope: {cli_args.selection_scope}")
         opt = Dion2(
             param_groups,
             distributed_mesh=distributed_mesh,
@@ -511,6 +529,7 @@ def init_optimizer(
             use_polar_express=cli_args.use_polar_express,
             verbose=hp.verbose,
             triton_post_ortho=(not cli_args.no_triton_post_orthogonalize),
+            **scope_kwargs,
         )
     elif hp.optimizer == "normuon":
         if device_mesh is not None:
@@ -559,6 +578,10 @@ def init_optimizer(
         print0(f"NorDion2 LR adjust method: {hp.adjust_lr}")
         print0(f"Triton Newton-Schulz kernels: {not cli_args.no_triton}")
         print0(f"Distributed NorDion2 using: {comm_method}")
+        scope_kwargs = {}
+        if cli_args.selection_scope is not None:
+            scope_kwargs["selection_scope"] = cli_args.selection_scope
+            print0(f"NorDion2 selection scope: {cli_args.selection_scope}")
         opt = NorDion2(
             param_groups,
             distributed_mesh=distributed_mesh,
@@ -573,6 +596,7 @@ def init_optimizer(
             use_triton=(not cli_args.no_triton),
             use_polar_express=cli_args.use_polar_express,
             triton_post_ortho=(not cli_args.no_triton),
+            **scope_kwargs,
         )
 
     elif hp.optimizer == "dion_simple":
