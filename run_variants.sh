@@ -59,9 +59,17 @@ VARIANTS=(
     "4-cutlass|--optimizer $UNFILTERED --use_gns_package"
     "5-gns|--optimizer $UNFILTERED --use_gns_package --no_triton --use_gns_alg"
     "6-gns-cutlass|--optimizer $UNFILTERED --use_gns_package --use_gns_alg"
-    "7-dion2-0.5|--optimizer $FILTERED --use_gns_package --use_gns_alg --ortho_fraction 0.5"
-    "8-dion2-0.25|--optimizer $FILTERED --use_gns_package --use_gns_alg --ortho_fraction 0.25"
+    "7-dion2-0.5|--optimizer $FILTERED --use_gns_package --use_gns_alg --ortho_fraction 0.5  --cuda_graph"
+    "8-dion2-0.25|--optimizer $FILTERED --use_gns_package --use_gns_alg --ortho_fraction 0.25  --cuda_graph"
     "9-adamw|--optimizer adamw"
+    # CUDA-graph capture of optimizer.step() (upstream #104), paired with the ungraphed
+    # runs above so each is a clean A/B on the same node in the same job: 10 mirrors
+    # 3-baseline, 11 mirrors 8-dion2-0.25. The win is host-side (one graph launch instead
+    # of per-matrix dispatch), so watch opt_cpu -- and gpu_step only where the step was
+    # launch-bound. 0.25 is the filtered fraction paired here because it does the least
+    # GPU work per step and so is the most launch-bound of the two.
+    "10-baseline-cudagraph|--optimizer $UNFILTERED --use_gns_package --no_triton --cuda_graph"
+    "11-gns-cutlass-cudagraph|--optimizer $UNFILTERED --use_gns_package --use_gns_alg --cuda_graph"
 )
 
 run() {
