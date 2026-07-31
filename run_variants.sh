@@ -53,14 +53,23 @@ esac
 # from the selected family via $UNFILTERED / $FILTERED, expanded here at
 # definition time -- no post-hoc string rewriting.
 VARIANTS=(
-    # "1-plain|--optimizer $UNFILTERED --no_triton"
-    # "2-triton|--optimizer $UNFILTERED"
+    "1-plain|--optimizer $UNFILTERED --no_triton"
+    "2-triton|--optimizer $UNFILTERED"
     "3-baseline|--optimizer $UNFILTERED --use_gns_package --no_triton"
     "4-cutlass|--optimizer $UNFILTERED --use_gns_package"
     "5-gns|--optimizer $UNFILTERED --use_gns_package --no_triton --use_gns_alg"
     "6-gns-cutlass|--optimizer $UNFILTERED --use_gns_package --use_gns_alg"
-    "7-dion2-0.5|--optimizer $FILTERED --use_gns_package --use_gns_alg --ortho_fraction 0.5"
-    "8-dion2-0.25|--optimizer $FILTERED --use_gns_package --use_gns_alg --ortho_fraction 0.25"
+    "7-dion2-0.5|--optimizer $FILTERED --use_gns_package --use_gns_alg --ortho_fraction 0.5  --cuda_graph"
+    "8-dion2-0.25|--optimizer $FILTERED --use_gns_package --use_gns_alg --ortho_fraction 0.25  --cuda_graph"
+    "9-adamw|--optimizer adamw"
+    # CUDA-graph capture of optimizer.step() (upstream #104), paired with the ungraphed
+    # runs above so each is a clean A/B on the same node in the same job: 10 mirrors
+    # 3-baseline, 11 mirrors 8-dion2-0.25. The win is host-side (one graph launch instead
+    # of per-matrix dispatch), so watch opt_cpu -- and gpu_step only where the step was
+    # launch-bound. 0.25 is the filtered fraction paired here because it does the least
+    # GPU work per step and so is the most launch-bound of the two.
+    "10-baseline-cudagraph|--optimizer $UNFILTERED --use_gns_package --no_triton --cuda_graph"
+    "11-gns-cutlass-cudagraph|--optimizer $UNFILTERED --use_gns_package --use_gns_alg --cuda_graph"
 )
 
 run() {
@@ -97,15 +106,33 @@ SIZES=("${selected[@]}")
 
 echo "Optimizer family: $FAMILY  (unfiltered=$UNFILTERED, filtered=$FILTERED)"
 
+# A crashing variant must not take the rest of the sweep with it: under `set -e`
+# one bad run aborted the whole job and cost us the six variants queued behind it
+# (jobs 14931328 / 14931329 died at 2-triton with only 1-plain collected).
+# Failures are collected and re-reported at the end, and the script still exits
+# non-zero so SLURM marks the job failed.
+failures=()
+
 for s in "${SIZES[@]}"; do
     sname="${s%%|*}"; sflags="${s#*|}"
     for v in "${VARIANTS[@]}"; do
         vname="${v%%|*}"; vflags="${v#*|}"
         echo "=== ${sname} / ${FAMILY} / ${vname}  (${sflags} ${vflags}) ==="
         # sflags/vflags are intentionally word-split into separate CLI args.
+        # A failing `run` in an `if` condition does not trip `set -e`.
         # shellcheck disable=SC2086
-        run "results/${sname}/${FAMILY}/${vname}" $sflags $vflags
+        if ! run "results/${sname}/${FAMILY}/${vname}" $sflags $vflags; then
+            echo "!!! FAILED: ${sname}/${FAMILY}/${vname} -- continuing with the remaining variants" >&2
+            failures+=("${sname}/${FAMILY}/${vname}")
+        fi
     done
 done
+
+if (( ${#failures[@]} > 0 )); then
+    echo "Done, but ${#failures[@]} variant(s) FAILED:" >&2
+    printf '  %s\n' "${failures[@]}" >&2
+    echo "Metrics for the variants that did run are in results/<size>/<family>/<variant>/" >&2
+    exit 1
+fi
 
 echo "Done. Metrics in results/<size>/<family>/<variant>/active_step_metrics_<ts>.json"

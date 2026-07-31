@@ -30,6 +30,10 @@ Usage:
   # Options:
   #   --profile_wait 5 --profile_warmup 1 --profile_active 3 --profile_out .
   #   --grad_accum 1   (micro-steps of fwd/bwd per optimizer step)
+  #   --cuda_graph [--cuda_graph_warmup 10]
+  #       Capture optimizer.step() into a CUDA graph and replay it
+  #       (dion.cuda_graph.CudaGraphOptimizer; Muon/NorMuon/Dion2/NorDion2 only).
+  #       Capture must land before the active window -- see the check in main().
 """
 
 import argparse
@@ -75,7 +79,14 @@ def synthetic_batch(hp: Hyperparameters):
 
 
 def training_step(
-    model, optimizer, x, y, autocast_ctx, grad_accum_steps: int, sync_log: bool = True
+    model,
+    optimizer,
+    x,
+    y,
+    autocast_ctx,
+    grad_accum_steps: int,
+    sync_log: bool = True,
+    set_grads_to_none: bool = True,
 ):
     """One full optimizer step: grad_accum_steps micro fwd/bwd, then step().
 
@@ -130,7 +141,13 @@ def training_step(
     if sync_log:
         cpu_opt_ms = (time.perf_counter() - cpu_opt_t0) * 1000.0
         ev_opt_end.record()
-    model.zero_grad(set_to_none=True)
+    # set_to_none=False is REQUIRED under CudaGraphOptimizer: capture pins the .grad
+    # tensors, and set_to_none=True hands the next backward a freshly allocated buffer
+    # that the replayed graph never reads -- it would keep replaying the capture-time
+    # gradients with no error and near-identical timings. CudaGraphOptimizer.zero_grad
+    # guards this, but only for optimizer.zero_grad; this is the model's, so the caller
+    # has to get it right. Default stays True (cheaper) for the ungraphed path.
+    model.zero_grad(set_to_none=set_grads_to_none)
 
     out = {"grad_norm": grad_norm, "loss": float("nan")}
     if sync_log:
@@ -184,6 +201,39 @@ def main():
     model, optimizer = build_model_and_optimizer(hp, cli_args, device_mesh)
     num_params = sum(p.numel() for p in model.parameters())
 
+    # CUDA-graph capture of optimizer.step() (upstream #104). The wrapper is opt-in and
+    # purely a host-side win: it collapses the megabatched step's per-matrix dispatch to
+    # one graph launch, so expect cpu_opt_ms to crater with gpu_opt_ms roughly unchanged.
+    cuda_graph = getattr(cli_args, "cuda_graph", False)
+    if cuda_graph:
+        from dion.cuda_graph import CudaGraphOptimizer
+        from dion.megabatch_base import DistributedOrthoBase
+
+        # Only the megabatched family is capturable: those carry group["lr"] as a live
+        # device tensor and keep the AdamW scalar step counter on-device. Plain Dion and
+        # torch.optim.AdamW would either fail inside the capture or silently bake their
+        # host-side scalars, so refuse rather than produce numbers nobody can trust.
+        if not isinstance(optimizer, DistributedOrthoBase):
+            raise ValueError(
+                f"--cuda_graph supports Muon / NorMuon / Dion2 / NorDion2, but "
+                f"--optimizer {hp.optimizer} built a {type(optimizer).__name__}."
+            )
+        # Capture must finish before the measured window opens: the capture step pays a
+        # cuda synchronize plus the record-and-replay, and any step before it is eager.
+        # Script warmup (2) + profiler wait + profiler warmup steps precede the active
+        # window; the wrapper captures on call number cuda_graph_warmup + 1.
+        pre_active_steps = 2 + wait + warmup
+        if cli_args.cuda_graph_warmup >= pre_active_steps:
+            raise ValueError(
+                f"--cuda_graph_warmup {cli_args.cuda_graph_warmup} would capture at or "
+                f"after the active window starts (only {pre_active_steps} steps precede "
+                f"it: 2 script warmup + {wait} wait + {warmup} profiler warmup). Lower "
+                "it, or raise --profile_warmup."
+            )
+        optimizer = CudaGraphOptimizer(
+            optimizer, warmup_steps=cli_args.cuda_graph_warmup
+        )
+
     # torch.compile the model, matching nanoplm's pure pipeline
     # (torch.compile(model, dynamic=False)). build_model_and_optimizer does not
     # compile, so without this the profiled step runs eager -- unlike nanoplm.
@@ -207,6 +257,21 @@ def main():
     print0(f"Grad-accum steps per optimizer step: {grad_accum_steps}")
     print0(f"torch.compile: {COMPILE} (dynamic=False)")
     print0(f"Per-step logging cuda-sync: {SYNC_LOG}")
+    if cuda_graph:
+        # The 2 pre-loop warmup steps consume wrapper calls too, so capture lands on
+        # profiled iteration cuda_graph_warmup - 2 (or inside the pre-loop warmup if the
+        # wrapper's warmup is shorter than that).
+        capture_it = cli_args.cuda_graph_warmup - 2
+        where = (
+            f"captures on step {capture_it}" if capture_it >= 0
+            else "captures during the pre-loop warmup"
+        )
+        print0(
+            f"CUDA graph optimizer: True "
+            f"(warmup_steps={cli_args.cuda_graph_warmup}, {where})"
+        )
+    else:
+        print0("CUDA graph optimizer: False")
     print0("=" * 80)
 
     # bf16 autocast, same as train.py.
@@ -218,7 +283,10 @@ def main():
     # also has its own `wait`/`warmup` phases, but a couple of eager warmups here
     # keep the first captured step from paying one-time setup costs.
     for _ in range(2):
-        training_step(model, optimizer, x, y, autocast_ctx, grad_accum_steps, sync_log=SYNC_LOG)
+        training_step(
+            model, optimizer, x, y, autocast_ctx, grad_accum_steps,
+            sync_log=SYNC_LOG, set_grads_to_none=not cuda_graph,
+        )
         x, y = synthetic_batch(hp)
     torch.cuda.synchronize()
 
@@ -243,7 +311,8 @@ def main():
         t_prev = time.perf_counter()
         for it in range(total_iters):
             m = training_step(
-                model, optimizer, x, y, autocast_ctx, grad_accum_steps, sync_log=SYNC_LOG
+                model, optimizer, x, y, autocast_ctx, grad_accum_steps,
+                sync_log=SYNC_LOG, set_grads_to_none=not cuda_graph,
             )
             x, y = synthetic_batch(hp)
             profiler_step_cb()
@@ -289,6 +358,12 @@ def main():
         with open(out_path, "w") as f:
             json.dump(payload, f, indent=2)
         print0(f"Wrote {len(active_metrics)} active-step metrics (+config) to {out_path}")
+
+    if cuda_graph:
+        # Drop the graph before tearing down the process group. On the sharded path the
+        # captured megabatch all-to-all keeps NCCL ops alive and destroy_process_group()
+        # blocks on them, so skipping this hangs the multi-GPU runs at exit.
+        optimizer.release()
 
     if dist.is_initialized():
         dist.destroy_process_group()

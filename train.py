@@ -223,6 +223,21 @@ def parse_cli_args():
     parser.add_argument(
         "--split_heads", action="store_true", help="Split QKV params by head for orthogonalization"
     )
+    parser.add_argument(
+        "--cuda_graph",
+        action="store_true",
+        help="Wrap the optimizer in dion.cuda_graph.CudaGraphOptimizer, which captures "
+        "optimizer.step() into a CUDA graph and replays it (collapses per-matrix host "
+        "dispatch to one launch). Benchmark scripts only -- not wired into this file's "
+        "training loop yet",
+    )
+    parser.add_argument(
+        "--cuda_graph_warmup",
+        type=int,
+        default=10,
+        help="Eager optimizer steps before the CUDA graph is captured (--cuda_graph only). "
+        "The capture step itself is slow, so it must land outside any measured window",
+    )
 
     cli_args = parser.parse_args()
     if cli_args.config:
@@ -250,6 +265,7 @@ def parse_cli_args():
             "use_gns_alg",
             "split_heads",
             "time_optimizer",
+            "cuda_graph",
             "debug",
         ):
             if yaml_cfg.get(flag, False):
@@ -897,6 +913,17 @@ def main():
         hp=hp,
         cli_args=cli_args,
     )
+
+    if cli_args.cuda_graph:
+        # Only the benchmark scripts wrap the optimizer today. Doing it here needs more
+        # than the wrapper: this loop's zero_grad(set_to_none=True) would reallocate the
+        # .grad buffers the graph pins, get_lr()'s `group["lr"] = ...` float assignment
+        # has to reach the captured graph, and the graph must be released before
+        # destroy_process_group() or shutdown hangs on the captured NCCL ops.
+        raise NotImplementedError(
+            "--cuda_graph is not supported by train.py's training loop yet; it is "
+            "currently used only by profile_training_step.py."
+        )
 
     # Learning rate scheduler
     def get_lr(it):
