@@ -47,6 +47,12 @@ from train import (
 
 def init_distributed_benchmark(dp_size, fs_size, tp_size) -> Optional[DeviceMesh]:
     """Initialize distributed (same logic as train.py but sets train module's MASTER_PROCESS)."""
+    # Capturing NCCL collectives (the megabatch all-to-all) into a CUDA graph requires disabling
+    # NCCL's record_stream bookkeeping, which is not graph-safe: otherwise a captured collective's
+    # buffers are reused mid-flight -- a use-after-free race that only manifests at full speed (an
+    # illegal memory access on the sharded --cuda_graph path; compute-sanitizer, which serializes,
+    # reports 0 errors). Must be set before init_process_group. See profile_training_step.py.
+    os.environ.setdefault("TORCH_NCCL_AVOID_RECORD_STREAMS", "1")
     assert torch.cuda.is_available(), "CUDA must be available"
     assert torch.distributed.is_available(), "Distributed must be available"
     assert all(
