@@ -64,6 +64,7 @@ class Hyperparameters:
     # Main optimizer hyperparameters
     lr: float = 0.02
     mu: float = 0.95
+    nesterov: bool = True
     weight_decay: float = 0.01
     ortho_fraction: float = 0.25
 
@@ -140,6 +141,13 @@ def parse_cli_args():
         "--ortho_fraction", type=float, default=None, help="Fraction to orthogonalize for Dion/Dion2"
     )
     parser.add_argument("--mu", type=float, default=None, help="Momentum coefficient")
+    parser.add_argument(
+        "--nesterov",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Nesterov momentum for Muon, NorMuon, and MuonReference (default: on). "
+        "Use --no-nesterov to disable.",
+    )
     parser.add_argument("--weight_decay", type=float, default=None, help="Weight decay")
     parser.add_argument(
         "--time_optimizer", action="store_true",
@@ -437,7 +445,7 @@ def init_optimizer(
             lr=hp.lr,
             mu=hp.mu,
             weight_decay=hp.weight_decay,
-            nesterov=True,
+            nesterov=hp.nesterov,
             adjust_lr=hp.adjust_lr,
             use_gram_newton_schulz=cli_args.use_gram_newton_schulz,
             use_triton=(not cli_args.no_triton),
@@ -496,7 +504,7 @@ def init_optimizer(
             mu=hp.mu,
             muon_beta2=0.95,
             weight_decay=hp.weight_decay,
-            nesterov=True,
+            nesterov=hp.nesterov,
             adjust_lr=hp.adjust_lr,
             use_triton=(not cli_args.no_triton),
             use_polar_express=cli_args.use_polar_express,
@@ -555,7 +563,7 @@ def init_optimizer(
             lr=hp.lr,
             mu=hp.mu,
             weight_decay=hp.weight_decay,
-            nesterov=True,
+            nesterov=hp.nesterov,
             adjust_lr=hp.adjust_lr,
         )
 

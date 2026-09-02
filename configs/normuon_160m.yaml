@@ -38,4 +38,5 @@ scalar_opt: adamw
 adjust_lr: spectral_norm
 lr: 0.02
 mu: 0.95
+nesterov: false
 weight_decay: 0.01

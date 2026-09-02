@@ -36,6 +36,7 @@ fs_size: null      # FSDP size
 optimizer: dion2
 scalar_opt: adamw
 mu: 0.95
+nesterov: false
 weight_decay: 0.01
 ortho_fraction: 0.5
 adjust_lr: spectral_norm

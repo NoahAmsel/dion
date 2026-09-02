@@ -37,6 +37,7 @@ replicate_mesh_grad_sync: true
 optimizer: dion
 scalar_opt: adamw
 mu: 0.95
+nesterov: false
 weight_decay: 0.01
 ortho_fraction: 0.5
 lr: 0.02

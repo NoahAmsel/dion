@@ -37,5 +37,6 @@ optimizer: muon
 scalar_opt: adamw
 adjust_lr: spectral_norm
 mu: 0.95
+nesterov: false
 weight_decay: 0.01
 lr: 0.02
