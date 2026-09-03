@@ -21,6 +21,7 @@ class GPTConfig:
     n_layer: int = 2
     n_head: int = 6
     n_embd: int = 768
+    tie_embeddings: bool = False
 
 
 class Rotary(torch.nn.Module):
@@ -135,7 +136,23 @@ class GPT(nn.Module):
                 h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             )
         )
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        # Tied: there is no separate readout parameter at all -- the embedding
+        # matrix IS the readout, applied functionally in _forward. Sharing one
+        # nn.Linear's weight with the embedding instead would have to be redone
+        # after every nn.Module._apply (.to(), .to_empty()), which silently
+        # un-shares them; owning a single tensor makes that impossible.
+        self.lm_head = (
+            None
+            if config.tie_embeddings
+            else nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        )
+
+    @property
+    def readout_weight(self) -> torch.Tensor:
+        """The [vocab, n_embd] matrix used to produce logits."""
+        if self.config.tie_embeddings:
+            return self.transformer.wte.weight
+        return self.lm_head.weight
 
     def init_weights(self):
         self.apply(self._init_weights)
@@ -151,7 +168,17 @@ class GPT(nn.Module):
                 torch.nn.init.zeros_(module.bias)
 
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=1.0)
+            # Untied, the embedding scale is free: the residual stream is
+            # normalized before every sublayer, so only its direction matters.
+            # Tied, this same matrix is the readout, and there the scale is
+            # pinned -- the final rms_norm hands the head unit-RMS rows, so
+            # std = 1/sqrt(n_embd) puts logits at unit scale.
+            std = (
+                1.0 / math.sqrt(self.config.n_embd)
+                if self.config.tie_embeddings
+                else 1.0
+            )
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
 
         elif isinstance(module, Rotary):
             module.init_inv_freq()
@@ -172,16 +199,16 @@ class GPT(nn.Module):
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
+            logits = F.linear(x, self.readout_weight)
             logits = logits.float()  # use tf32/fp32 for logits
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
             )
 
         else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(
-                x[:, [-1], :]
+            # inference-time mini-optimization: only apply the readout on the very last position
+            logits = F.linear(
+                x[:, [-1], :], self.readout_weight
             )  # note: using list [-1] to preserve the time dim
             logits = logits.float()  # use tf32/fp32 for logits
             loss = None
@@ -291,6 +318,15 @@ def parallelize_gpt_model(
 
 
 def _apply_tp(model: GPT, tp_mesh: DeviceMesh):
+    if model.config.tie_embeddings:
+        # The tied matrix is one tensor playing two roles that want opposite
+        # shardings -- Rowwise as an embedding, Colwise as a readout -- and a
+        # DTensor holds a single placement. Fail here rather than silently
+        # sharding it wrongly for one of the two uses.
+        raise ValueError(
+            "tie_embeddings is not supported with tensor parallel: the shared "
+            "embedding/readout matrix would need two different TP placements."
+        )
     # Apply TP to embedding and lm_head
     # Shard weights to save memory but replicate both inputs and outputs
     tp_plan = {
@@ -384,10 +420,10 @@ def _apply_fsdp(
 
     # Shard placement when TP is enabled
     if tp_enabled:
-        shard_map = {
-            model.transformer.wte.weight: Shard(1),
-            model.lm_head.weight: Shard(1),
-        }
+        # Tied, wte.weight is also the readout, so one entry covers both uses.
+        shard_map = {model.transformer.wte.weight: Shard(1)}
+        if not model.config.tie_embeddings:
+            shard_map[model.lm_head.weight] = Shard(1)
         shard_placement_fn = lambda param: shard_map.get(param)
     fully_shard(
         model,

@@ -49,6 +49,7 @@ class Hyperparameters:
     model_dim: int = 768
     n_layer: int = 12
     n_head: int = 6
+    tie_embeddings: bool = False
 
     # Evaluation and logging
     val_loss_every: int = 125
@@ -155,6 +156,13 @@ def parse_cli_args():
     )
 
     # ---------- model ----------
+    parser.add_argument(
+        "--tie_embeddings",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Share one matrix between the token embedding and the output head "
+        "(default: off). Use --no-tie-embeddings to disable.",
+    )
     parser.add_argument("--model_dim", type=int, default=None)
     parser.add_argument("--n_layer", type=int, default=None)
     parser.add_argument("--n_head", type=int, default=None)
@@ -335,8 +343,15 @@ def init_optimizer(
 
     # Separate the model's parameters based on their types
     matrix_params = list(model.transformer.h.parameters())
-    embedding_params = list(model.transformer.wte.parameters())
-    lm_head_params = list(model.lm_head.parameters())
+    # Tied, one matrix serves as both embedding and readout, so it forms a
+    # single group -- the readout group, whose dense gradient dominates the
+    # sparse input-lookup gradient and whose lr sets the logit scale.
+    if hp.tie_embeddings:
+        embedding_params = []
+        lm_head_params = list(model.transformer.wte.parameters())
+    else:
+        embedding_params = list(model.transformer.wte.parameters())
+        lm_head_params = list(model.lm_head.parameters())
 
     # Matrix params use optimizer default settings
     param_groups = [dict(params=matrix_params)]
@@ -799,6 +814,7 @@ def main():
         n_layer=hp.n_layer,
         n_head=hp.n_head,
         n_embd=hp.model_dim,
+        tie_embeddings=hp.tie_embeddings,
     )
     with torch.device("meta"):
         model = GPT(gpt_config)
