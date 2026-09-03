@@ -42,13 +42,13 @@ CKPT_DIR="$RUN_ROOT/checkpoints/$RUN_NAME"
 WANDB_ENTITY_NAME="${WANDB_ENTITY_NAME:-noahamselsteam}"
 WANDB_PROJECT_NAME="${WANDB_PROJECT_NAME:-dion}"
 mkdir -p "$RUN_ROOT/wandb"
-export SINGULARITYENV_WANDB_DIR="$RUN_ROOT"
-export SINGULARITYENV_WANDB_ENTITY="$WANDB_ENTITY_NAME"
+export APPTAINERENV_WANDB_DIR="$RUN_ROOT"
+export APPTAINERENV_WANDB_ENTITY="$WANDB_ENTITY_NAME"
 # Optional run tags, comma-separated. sbatch forwards the submitting shell's
 # environment, so `WANDB_TAGS=ablation,seed0 sbatch submit_train.slurm ...`
 # works; train.py's wandb.init() takes no tags= argument, the env var is the way.
 if [[ -n "${WANDB_TAGS:-}" ]]; then
-    export SINGULARITYENV_WANDB_TAGS="$WANDB_TAGS"
+    export APPTAINERENV_WANDB_TAGS="$WANDB_TAGS"
 fi
 
 # nproc_per_node = the GPUs SLURM gave us. SLURM_GPUS_ON_NODE is set by the
@@ -66,12 +66,12 @@ fi
 # shared VAST (/scratch/$USER/.cache), so two concurrent jobs that compile the
 # same kernel at the same moment race on the same cache entry and die with
 # ESTALE / EBADHANDLE. Job-scoped local dirs remove the race; the cost is a cold
-# compile per job. SINGULARITYENV_ is how fancy_sing passes env into the
+# compile per job. APPTAINERENV_ is how apptainer passes env into the
 # container, and /tmp is bound from the host, so these are node-local.
 CACHE_ROOT="${SLURM_TMPDIR:-/tmp}/dion-cache-${SLURM_JOB_ID:-$$}"
 mkdir -p "$CACHE_ROOT/triton" "$CACHE_ROOT/inductor"
-export SINGULARITYENV_TRITON_CACHE_DIR="$CACHE_ROOT/triton"
-export SINGULARITYENV_TORCHINDUCTOR_CACHE_DIR="$CACHE_ROOT/inductor"
+export APPTAINERENV_TRITON_CACHE_DIR="$CACHE_ROOT/triton"
+export APPTAINERENV_TORCHINDUCTOR_CACHE_DIR="$CACHE_ROOT/inductor"
 
 echo "=== $RUN_NAME on $(hostname) ==="
 echo "GPUs:        $NGPU  (CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>})"

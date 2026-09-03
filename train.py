@@ -1056,6 +1056,10 @@ def main():
         grad_norm = torch.nn.utils.get_total_norm(
             [p.grad for p in model.parameters() if p.grad is not None]
         )
+        # The learning rate this step actually used: the matrix group's base lr
+        # scaled by the warmup/warmdown schedule. Read before lr_scheduler.step(),
+        # which advances the groups to the *next* step's value.
+        current_lr = optimizer.param_groups[0]["lr"]
         optimizer.step()
         lr_scheduler.step()
         model.zero_grad(set_to_none=True)
@@ -1072,6 +1076,7 @@ def main():
             log_dict = {
                 "train/loss": train_loss.item(),
                 "train/grad_norm": grad_norm.item(),
+                "train/lr": current_lr,
                 "step": step,
                 "time/training_time_ms": current_training_time_ms,
             }
