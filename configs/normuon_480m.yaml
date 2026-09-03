@@ -1,0 +1,51 @@
+
+# — Model —
+# 482,672,640 parameters (354M in the blocks, 129M in the untied embedding +
+# head). head_dim is 1280/10 = 128, matching normuon_160m.yaml -- model_dim must
+# be divisible by n_head, which CausalSelfAttention asserts.
+model_dim: 1280
+n_layer: 18
+n_head: 10
+sequence_length: 1024
+
+# — Batching & Training —
+batch_size: 1024
+# 64, not the 160m model's 128: d*L is 2.5x and the parameter state 3x, which
+# extrapolates the 160m model's measured 61 GB peak to somewhere in the
+# 90-115 GB range on a 139.8 GB H200 -- too close to the edge to launch a sweep
+# on. Probe 128 (see experiments/sweep_normuon_480m_lr.sh) and raise it if the
+# measured peak leaves room.
+device_batch_size: 64
+num_iterations: 3000
+
+# — Learning‐rate schedule —
+warmup_ratio: 0.0
+warmdown_ratio: 0.2
+
+# — Validation & Checkpointing —
+val_loss_every: 50
+val_tokens: 5242880
+
+# — Weights & Biases logging —
+wandb_project_name: gpt-train
+wandb_job_name: null
+no_wandb: false
+
+# — Distributed training —
+dp_size: null      # data‐parallel size
+fs_size: null      # FSDP size 
+
+# — Miscellaneous flags —
+debug: false
+no_compile: false
+no_triton: false
+
+# — Optimizer & Hyperparameters —
+optimizer: normuon 
+scalar_opt: adamw
+adjust_lr: spectral_norm
+# lr = 0.01 also works for Muon at this scale
+lr: 0.01
+mu: 0.95
+nesterov: false
+weight_decay: 0.01

@@ -78,6 +78,7 @@ echo "GPUs:        $NGPU  (CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}
 echo "data_dir:    $DATA_DIR"
 echo "checkpoints: $CKPT_DIR"
 echo "wandb:       $WANDB_ENTITY_NAME/$WANDB_PROJECT_NAME -> $RUN_ROOT/wandb"
+echo "compile dir: $CACHE_ROOT  (SLURM_TMPDIR=${SLURM_TMPDIR:-<unset>})"
 echo "train args:  $*"
 echo
 
