@@ -1,8 +1,9 @@
 
 # — Model —
-# 482,672,640 parameters (354M in the blocks, 129M in the untied embedding +
-# head). head_dim is 1280/10 = 128, matching normuon_160m.yaml -- model_dim must
-# be divisible by n_head, which CausalSelfAttention asserts.
+# 418,283,520 parameters with tie_embeddings on: 354M in the blocks plus one
+# shared 64M embedding/readout matrix (482,672,640 untied). head_dim is
+# 1280/10 = 128, matching normuon_160m.yaml -- model_dim must be divisible by
+# n_head, which CausalSelfAttention asserts.
 model_dim: 1280
 n_layer: 18
 n_head: 10
@@ -14,7 +15,7 @@ batch_size: 1024
 # 64, not the 160m model's 128: d*L is 2.5x and the parameter state 3x, which
 # extrapolates the 160m model's measured 61 GB peak to somewhere in the
 # 90-115 GB range on a 139.8 GB H200 -- too close to the edge to launch a sweep
-# on. Probe 128 (see experiments/sweep_normuon_480m_lr.sh) and raise it if the
+# on. Probe 128 (see experiments/sweep_normuon_418m_lr.sh) and raise it if the
 # measured peak leaves room.
 device_batch_size: 64
 num_iterations: 3000

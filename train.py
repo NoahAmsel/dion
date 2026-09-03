@@ -1,8 +1,10 @@
 import argparse
 import os
+import random
 import shutil
 import time
 import tempfile
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
@@ -51,6 +53,9 @@ class Hyperparameters:
     n_head: int = 6
     tie_embeddings: bool = False
 
+    # Reproducibility
+    seed: int = 0
+
     # Evaluation and logging
     val_loss_every: int = 125
     val_tokens: int = 10485760
@@ -88,6 +93,36 @@ MASTER_PROCESS = True
 def print0(*args):
     if MASTER_PROCESS:
         print(*args)
+
+
+def set_seed(seed: int) -> None:
+    """Seed every RNG this training run draws from.
+
+    The same seed is used on every rank, deliberately:
+
+    * Model init must agree across ranks. DDP happens to paper over a mismatch
+      by broadcasting rank 0's parameters, but FSDP initializes each shard
+      locally with no such broadcast, so differing seeds would silently give a
+      model whose shards came from different draws.
+    * Dion and DionSimple draw a random ``Q`` per parameter
+      (``dion.py`` / ``dion_simple.py``). Ranks holding pieces of the same
+      matrix must draw the same projection.
+
+    Nothing here wants a per-rank stream: the data loader is deterministic and
+    already offset by ``dp_rank``, and the model has no dropout.
+
+    This pins initialization and the optimizers' random draws. It does not make
+    a run bit-for-bit reproducible -- cuBLAS split-k, NCCL reduction order and
+    atomics remain nondeterministic -- so use it to remove init as a variable
+    between arms, not to expect identical loss curves across machines.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    # torch.manual_seed seeds the CPU generator and all CUDA devices; the
+    # explicit CUDA call documents that and is harmless if CUDA is absent.
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def parse_cli_args():
@@ -178,6 +213,12 @@ def parse_cli_args():
     parser.add_argument("--sequence_length", type=int, default=None)
     parser.add_argument("--warmup_ratio", type=float, default=None)
     parser.add_argument("--warmdown_ratio", type=float, default=None)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="RNG seed, applied identically on every rank (default: 0)",
+    )
 
     # ---------- wandb logging ----------
     parser.add_argument("--no_wandb", action="store_true", help="Disable wandb logging")
@@ -725,6 +766,9 @@ def main():
     if hp.checkpoint_freq > 0:
         if not hp.checkpoint_dir:
             raise ValueError("Must specify --checkpoint_dir to save checkpoints")
+
+    # Seed before any model construction or optimizer state allocation.
+    set_seed(hp.seed)
 
     # --- Distributed training initialization ---
     device_mesh = init_distributed(
