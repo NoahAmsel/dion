@@ -3,6 +3,7 @@
 model_dim: 768
 n_layer: 12
 n_head: 6
+tie_embeddings: true
 sequence_length: 1024
 
 # — Batching & Training —
@@ -11,7 +12,7 @@ device_batch_size: 128
 num_iterations: 3000
 
 # — Learning‐rate schedule —
-warmup_ratio: 0.0
+warmup_ratio: 0.05
 warmdown_ratio: 0.2
 
 # — Validation & Checkpointing —
@@ -35,8 +36,8 @@ no_triton: false
 # — Optimizer & Hyperparameters —
 optimizer: muon 
 scalar_opt: adamw
-adjust_lr: spectral_norm
+adjust_lr: rms_norm
 mu: 0.95
 nesterov: false
 weight_decay: 0.01
-lr: 0.02
+lr: 0.002

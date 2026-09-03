@@ -74,6 +74,7 @@ class CausalSelfAttention(nn.Module):
         self.c_v = nn.Linear(self.n_embd, self.n_embd, bias=False)
         # output projection
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.c_proj._residual_proj = True
         self.rotary = Rotary(self.head_dim)
 
     def forward(self, x):
@@ -103,6 +104,7 @@ class MLP(nn.Module):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
+        self.c_proj._residual_proj = True
 
     def forward(self, x):
         x = self.c_fc(x)
@@ -163,6 +165,16 @@ class GPT(nn.Module):
             fan_out = module.weight.size(0)
             fan_in = module.weight.size(1)
             std = 1.0 / math.sqrt(fan_in) * min(1.0, math.sqrt(fan_out / fan_in))
+            if getattr(module, "_residual_proj", False):
+                # GPT-2's 1/sqrt(2L) downscaling of the residual output
+                # projections, so the residual stream does not grow with depth
+                # at init. Deliberately not zeroed (modded-nanogpt's choice):
+                # zeroing every branch makes the network the identity, and with
+                # tie_embeddings the readout is then the embedding matrix
+                # itself, which puts a ~sqrt(d) logit on the *current* token.
+                # Measured at d=1280, L=18: loss at init 35.78 zeroed vs 11.28
+                # downscaled, against ln(V) = 10.83.
+                std /= math.sqrt(2 * self.config.n_layer)
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
