@@ -46,6 +46,8 @@ class Hyperparameters:
     num_iterations: int = 5000
     warmup_ratio: float = 0.01
     warmdown_ratio: float = 0.2
+    # Dion3 cools down to a fraction of peak rather than to zero.
+    warmdown_final_ratio: float = 0.1
 
     # Model config
     model_dim: int = 768
@@ -71,6 +73,8 @@ class Hyperparameters:
     lr: float = 0.02
     mu: float = 0.95
     nesterov: bool = True
+    adamw_beta1: float = 0.9
+    adamw_beta2: float = 0.95
     weight_decay: float = 0.01
     ortho_fraction: float = 0.25
 
@@ -213,6 +217,14 @@ def parse_cli_args():
     parser.add_argument("--sequence_length", type=int, default=None)
     parser.add_argument("--warmup_ratio", type=float, default=None)
     parser.add_argument("--warmdown_ratio", type=float, default=None)
+    parser.add_argument(
+        "--warmdown_final_ratio",
+        type=float,
+        default=None,
+        help="Cooldown endpoint as a fraction of peak lr (default: 0.1)",
+    )
+    parser.add_argument("--adamw_beta1", type=float, default=None)
+    parser.add_argument("--adamw_beta2", type=float, default=None)
     parser.add_argument(
         "--seed",
         type=int,
@@ -398,22 +410,27 @@ def init_optimizer(
     param_groups = [dict(params=matrix_params)]
 
     # Add additional param groups with the necessary configurations for scalar params
+    # Dion3 recipe: the AdamW groups run at the plain base learning rate -- no
+    # shape-dependent scaling and no separate knob -- while the matrix groups get
+    # the sqrt(d_out / d_in) factor via adjust_lr. Weight decay is matrix-only.
     param_groups.append(
         dict(
             params=embedding_params,
             algorithm=hp.scalar_opt,
             lr=hp.lr,  # no LR adjustment for embedding parameters
-            betas=(0.95, 0.98),
+            betas=(hp.adamw_beta1, hp.adamw_beta2),
             weight_decay=0,  # no weight decay for embedding parameters
         )
     )
+    # lm_head_lr_scale is 1.0 for adamw, so the Dion3 recipe's "AdamW runs at the
+    # plain base lr" holds; it applies Dion's 1/sqrt(d_in) factor only under lion.
     lm_head_lr = hp.lr * lm_head_lr_scale(hp.scalar_opt, hp.model_dim)
     param_groups.append(
         dict(
             params=lm_head_params,
             algorithm=hp.scalar_opt,
             lr=lm_head_lr,
-            betas=(0.95, 0.98),
+            betas=(hp.adamw_beta1, hp.adamw_beta2),
             weight_decay=0,  # no weight decay for lm_head parameters
         )
     )
@@ -926,7 +943,9 @@ def main():
         elif it <= hp.num_iterations - warmdown_iters:
             return 1.0
         else:
-            return (hp.num_iterations - it) / warmdown_iters
+            # Linear cooldown to warmdown_final_ratio of peak, not to zero.
+            decayed = (hp.num_iterations - it) / warmdown_iters
+            return hp.warmdown_final_ratio + (1.0 - hp.warmdown_final_ratio) * decayed
 
     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, get_lr)
 

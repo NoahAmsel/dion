@@ -11,7 +11,7 @@ tie_embeddings: true
 sequence_length: 1024
 
 # — Batching & Training —
-batch_size: 1024
+batch_size: 512
 # 64, not the 160m model's 128: d*L is 2.5x and the parameter state 3x, which
 # extrapolates the 160m model's measured 61 GB peak to somewhere in the
 # 90-115 GB range on a 139.8 GB H200 -- too close to the edge to launch a sweep
@@ -25,7 +25,7 @@ warmup_ratio: 0.05
 warmdown_ratio: 0.2
 
 # — Validation & Checkpointing —
-val_loss_every: 50
+val_loss_every: 100
 val_tokens: 5242880
 
 # — Weights & Biases logging —
@@ -45,9 +45,9 @@ no_triton: false
 # — Optimizer & Hyperparameters —
 optimizer: normuon 
 scalar_opt: adamw
-adjust_lr: rms_norm
-# for Muon use 0.002 instead
-lr: 0.004
+# for adjust_lr = rms_norm, use lr 0.004 for NorMuon and 0.002 for Muon
+adjust_lr: spectral_norm
+lr: 0.02
 mu: 0.95
 nesterov: false
 weight_decay: 0.01
