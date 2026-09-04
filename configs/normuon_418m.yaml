@@ -46,8 +46,8 @@ no_triton: false
 optimizer: normuon 
 scalar_opt: adamw
 adjust_lr: rms_norm
-# lr = 0.01 also works for Muon at this scale
-lr: 0.0015
+# for Muon use 0.002 instead
+lr: 0.004
 mu: 0.95
 nesterov: false
 weight_decay: 0.01

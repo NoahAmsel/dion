@@ -52,14 +52,21 @@ launch() {
             "$@"
 }
 
+# winners muon: 0.002. normuon: 0.004
 for opt in muon normuon; do
     for lr in 0.0005 0.001 0.002 0.004 0.008; do
         launch "$opt" "$lr" "$@"
     done
 done
 
-# for opt in dion2 dion3; do
-#     for lr in 0.005 0.01 0.02; do
-#         launch "$opt" "$lr" "${DION_FLAGS[@]}" "$@"
-#     done
-# done
+for opt in dion2; do
+    for lr in 0.001 0.002 0.004; do
+        launch "$opt" "$lr" "${DION_FLAGS[@]}" "$@"
+    done
+done
+
+for opt in dion3; do
+    for lr in 0.002 0.004 0.008; do
+        launch "$opt" "$lr" "${DION_FLAGS[@]}" "$@"
+    done
+done
