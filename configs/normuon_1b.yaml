@@ -1,0 +1,63 @@
+# — Model —
+# 1,105,133,568 parameters: 925M in the blocks plus a 90M embedding and a
+# separate 90M readout. Geometry follows the Dion3 paper's 1B config (arXiv
+# 2608.11612) in depth and head count, but at model_dim 1792 rather than 1536 so
+# the total lands just over 1B and matches the smallest scale in the internal
+# ledger (1.06B). MLP inner width is the usual 4 * model_dim = 7168.
+# head_dim = 1792/16 = 112 -- a multiple of 8, so SDPA's flash kernel takes it.
+# Embeddings are NOT tied here, unlike the 418M config.
+model_dim: 1792
+n_layer: 24
+n_head: 16
+tie_embeddings: false
+sequence_length: 1024
+
+# — Batching & Training —
+# num_iterations = target_tokens / (batch_size * sequence_length); here
+# 20e9 / (512 * 1024) = 38147 steps = 20,000,014,336 tokens.
+#
+# batch_size 512 is carried over from the 418M runs: 512 x 1024 = 524,288
+# tokens/step, within 14% of the paper's internal 458,752 (56 seqs x 8192).
+# The token count matches; the shape does not (8x the sequence length there).
+batch_size: 512
+# 32 with fs_size 4 gives grad_accum = 512 / (4 * 32) = 4, and ~64 GiB per GPU
+# by the fit in launch_1b_crossover.sh -- 67% of a 96GB GH200. 64 would need
+# ~122 GiB and only fits the 144GB part; batch_size / (fs_size * device_batch)
+# must stay an integer, so those are the two choices at this world size.
+device_batch_size: 32
+num_iterations: 38147
+
+# — Learning‐rate schedule —
+warmup_ratio: 0.01
+warmdown_ratio: 0.25
+warmdown_final_ratio: 0.1
+
+# — Validation & Checkpointing —
+val_loss_every: 500
+val_tokens: 5242880
+
+# — Weights & Biases logging —
+wandb_project_name: gpt-train
+wandb_job_name: null
+no_wandb: false
+
+# — Distributed training —
+dp_size: null      # data‐parallel size
+fs_size: 4         # FSDP size -- one 4-GPU node, shards params/grads/opt state
+                   # (but NOT activations, which is what sets device_batch_size)
+
+# — Miscellaneous flags —
+debug: false
+no_compile: false
+no_triton: false
+
+# — Optimizer & Hyperparameters —
+# The tuned 418M optimum, which the paper also reports for NorMuon at 1B: lr 0.01.
+optimizer: normuon
+scalar_opt: adamw
+adjust_lr: spectral_norm
+lr: 0.01
+mu: 0.95
+muon_beta2: 0.95
+nesterov: false
+weight_decay: 0.01
