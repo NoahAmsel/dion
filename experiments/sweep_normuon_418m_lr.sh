@@ -8,7 +8,7 @@
 # would be 24 jobs:
 #   STAGE 1 (default, 8 jobs)  sweep lr for muon and normuon at the paper's mu=0.9
 #   STAGE 2 (4 jobs)           sweep mu at whichever lr won stage 1
-#   STAGE 3 (8 jobs)           sweep lr for dion2/dion3 at ortho_fraction 0.25
+#   STAGE 3 (16 jobs)          sweep lr for dion2/dion3 at ortho_fraction 0.25 and 1/16
 #
 #   ./sweep_normuon_418m_lr.sh
 #   STAGE=2 STAGE2_LR=0.01 ./sweep_normuon_418m_lr.sh
@@ -45,13 +45,19 @@
 # Our earlier f=0.25 runs found no shift at all, but those used
 # adjust_lr: rms_norm, which is not this recipe, so that result does not settle it.
 #
-# The stage 1 ladder happens to separate all three hypotheses cleanly, given a
-# baseline optimum of 0.01:
-#     lr 0.01  ->  no shift (what we measured under rms_norm)
-#     lr 0.02  ->  eta/sqrt(f) at f=0.25
-#     lr 0.04  ->  eta/f      at f=0.25
-# 0.005 brackets it from below. Reusing the same four points also makes stage 3
-# directly comparable to stage 1 run for run.
+# Two fractions, because a rule about how the optimum moves with f is much better
+# tested at two values of f than one. Against a baseline optimum of 0.01 the
+# stage 1 ladder pins the predictions:
+#     f = 0.25    lr 0.01 no shift | 0.02 eta/sqrt(f) | 0.04 eta/f
+#     f = 0.0625  lr 0.01 no shift | 0.04 eta/sqrt(f) | 0.16 eta/f  (0.16 not run)
+# So every rung except eta/f at f=1/16 is covered, and 0.16 is far enough past
+# where the baselines diverge (0.04 already costs them 0.07-0.11 nats) that it is
+# not worth a job. 0.005 brackets from below, and reusing stage 1's four points
+# keeps stage 3 comparable to it run for run.
+#
+# f=1/16 selects 80 of 1280 rows per step on the square matrices. If the deficit
+# is a coverage cost -- each row updated only a fraction f of the time -- it should
+# grow markedly from f=0.25; if it is roughly flat in f, that reading is wrong.
 #
 # Not included, but cheap and worth doing if stage 3 disagrees with the paper:
 # an ortho_fraction ~1 control at lr=0.01. Under the previous recipe that
@@ -66,16 +72,19 @@ cd "$(dirname "$(readlink -f "$0")")/.."
 # Only dion2 / dion3 accept these: their call sites pass fraction,
 # use_gram_newton_schulz and use_polar_express, while Muon and NorMuon take
 # neither ortho_fraction nor use_gram_newton_schulz and would ignore them.
-DION_FLAGS=(--ortho_fraction 0.25 --use_polar_express --use_gram_newton_schulz)
+# --ortho_fraction is supplied per loop in stage 3, not here.
+DION_FLAGS=(--use_polar_express --use_gram_newton_schulz)
 
 # The wandb tag carries the optimizer because use_polar_express and
 # use_gram_newton_schulz never reach wandb's config -- train.py logs
 # hp.__dict__ and those two live on cli_args. dion3-recipe separates this
 # generation from the earlier rms_norm / cooldown-to-zero runs.
+TAG_EXTRA=""   # appended to WANDB_TAGS; stage 3 uses it to mark the fraction
+
 launch() {
     local opt="$1" lr="$2" mu="$3"; shift 3
     echo "=== $opt lr=$lr mu=$mu ==="
-    WANDB_TAGS="$opt,418m,1b-tokens,lr-mu-sweep,dion3-recipe" \
+    WANDB_TAGS="$opt,418m,1b-tokens,lr-mu-sweep,dion3-recipe${TAG_EXTRA}" \
     sbatch \
         --job-name="${opt}_418m" \
         --time=02:50:00 \
@@ -111,11 +120,16 @@ case "$STAGE" in
     done
     ;;
   3)
-    for opt in dion2 dion3; do
-        for lr in 0.005 0.01 0.02; do
-            launch "$opt" "$lr" 0.95 "${DION_FLAGS[@]}" "$@"
+    for frac in 0.0625; do
+        TAG_EXTRA=",f${frac}"
+        for opt in dion2 dion3; do
+            for lr in 0.01 0.02 0.04; do
+                launch "$opt" "$lr" 0.95 --ortho_fraction "$frac" \
+                    "${DION_FLAGS[@]}" "$@"
+            done
         done
     done
+    TAG_EXTRA=""
     ;;
   *) echo "error: STAGE must be 1, 2 or 3" >&2; exit 1 ;;
 esac
