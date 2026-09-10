@@ -538,7 +538,27 @@ class DistributedOrthoBase(Optimizer):
         return sd
 
     def load_state_dict(self, state_dict):
+        # torch.optim.Optimizer.load_state_dict rebuilds param_groups from the
+        # incoming groups, keeping only "params" from the live ones -- so any group
+        # key the caller's state dict does not carry is lost. Loading through
+        # torch.distributed.checkpoint's set_state_dict() does exactly that:
+        # "algorithm" comes back missing and the loop below raises KeyError
+        # (observed resuming a NorMuon run from a DCP checkpoint). Every other
+        # group key is at the same risk, and losing one of those would be worse
+        # than the crash -- "mu", "muon_beta2", "adjust_lr" or "fraction" quietly
+        # reverting to a default would train on the wrong hyperparameters.
+        #
+        # These values come from construction, not from the checkpoint: the caller
+        # has already built this optimizer with the configuration it wants, and the
+        # checkpoint is only being asked for state. So restore anything the load
+        # dropped. Keys the incoming state dict does carry still win, which keeps
+        # a plain torch.load() round trip behaving as before.
+        prior_groups = [dict(group) for group in self.param_groups]
         super().load_state_dict(state_dict)
+        for group, prior in zip(self.param_groups, prior_groups):
+            for key, value in prior.items():
+                if key != "params" and key not in group:
+                    group[key] = value
         # Refill the device hyperparameter tensors from the loaded values (a float from a normal
         # checkpoint, or a wrong-device tensor from one written by an earlier build).
         self._sync_hyperparam_tensors()

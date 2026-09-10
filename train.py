@@ -72,6 +72,7 @@ class Hyperparameters:
     # Main optimizer hyperparameters
     lr: float = 0.02
     mu: float = 0.95
+    muon_beta2: float = 0.95  # NorMuon / NorDion2 second-moment decay
     nesterov: bool = True
     adamw_beta1: float = 0.9
     adamw_beta2: float = 0.95
@@ -181,6 +182,12 @@ def parse_cli_args():
         "--ortho_fraction", type=float, default=None, help="Fraction to orthogonalize for Dion/Dion2"
     )
     parser.add_argument("--mu", type=float, default=None, help="Momentum coefficient")
+    parser.add_argument(
+        "--muon_beta2",
+        type=float,
+        default=None,
+        help="Second-moment decay for NorMuon and NorDion2 (default: 0.95)",
+    )
     parser.add_argument(
         "--nesterov",
         action=argparse.BooleanOptionalAction,
@@ -575,10 +582,11 @@ def init_optimizer(
             distributed_mesh=distributed_mesh,
             lr=hp.lr,
             mu=hp.mu,
-            muon_beta2=0.95,
+            muon_beta2=hp.muon_beta2,
             weight_decay=hp.weight_decay,
             nesterov=hp.nesterov,
             adjust_lr=hp.adjust_lr,
+            use_gram_newton_schulz=cli_args.use_gram_newton_schulz,
             use_triton=(not cli_args.no_triton),
             use_polar_express=cli_args.use_polar_express,
         )
@@ -608,7 +616,7 @@ def init_optimizer(
             lr=hp.lr,
             fraction=hp.ortho_fraction,
             mu=hp.mu,
-            muon_beta2=0.95,
+            muon_beta2=hp.muon_beta2,
             weight_decay=hp.weight_decay,
             adjust_lr=hp.adjust_lr,
             use_gram_newton_schulz=cli_args.use_gram_newton_schulz,
@@ -1036,6 +1044,16 @@ def main():
     autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
 
     start_step = 0 if checkpoint_manager.step is None else checkpoint_manager.step + 1
+
+    # LambdaLR's state is not in the checkpoint (see CheckpointManager._get_state_dict),
+    # so a resumed run would rebuild the scheduler at last_epoch = 0 and replay the
+    # schedule from the beginning -- re-running warmup, and reaching cooldown
+    # start_step steps late or, if that lands past num_iterations, never cooling
+    # down at all. Advance it to the step we are actually resuming at. get_lr is a
+    # pure function of the iteration, so replaying is exact and costs nothing.
+    for _ in range(start_step):
+        lr_scheduler.step()
+
     pbar = tqdm(total=hp.num_iterations, desc="Training", disable=not MASTER_PROCESS)
     pbar.update(start_step)
     for step in range(start_step, hp.num_iterations + 1):
