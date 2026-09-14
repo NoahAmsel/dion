@@ -22,6 +22,24 @@ class GPTConfig:
     n_head: int = 6
     n_embd: int = 768
     tie_embeddings: bool = False
+    # "relu2" is the original ReLU^2 MLP; "swiglu" uses separate up/gate/down
+    # matrices at the same 4 * n_embd inner width (so 1.5x the MLP parameters).
+    mlp_type: str = "relu2"
+    # Headwise sigmoid gate on the attention output (Qiu et al. 2025, arXiv
+    # 2505.06708): one scalar per head, computed from the attention input.
+    attn_gate: bool = False
+    # Learnable per-dimension gain on every RMSNorm (pre-sublayer, final, QK).
+    # Off, the norms have no parameters and compute exactly what F.rms_norm did.
+    norm_gain: bool = False
+
+
+def rms_norm(dim: int, config: "GPTConfig") -> nn.RMSNorm:
+    """An RMSNorm over the last dimension, with a learnable gain iff config.norm_gain.
+
+    eps=None matches the F.rms_norm calls this replaced (finfo(dtype).eps), so
+    with norm_gain off the output is unchanged and the module owns no parameters.
+    """
+    return nn.RMSNorm(dim, eps=None, elementwise_affine=config.norm_gain)
 
 
 class Rotary(torch.nn.Module):
@@ -76,6 +94,18 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.c_proj._residual_proj = True
         self.rotary = Rotary(self.head_dim)
+        # QK norm suggested by @Grad62304977
+        self.q_norm = rms_norm(self.head_dim, config)
+        self.k_norm = rms_norm(self.head_dim, config)
+        # Without gains the norm commutes with RoPE (a rotation preserves the
+        # norm), so the original norm-after-RoPE order is kept bit-for-bit. A
+        # per-dimension gain does not commute with the rotation, so with gains
+        # the norm moves before RoPE, as in Qwen3 and OLMo2.
+        self.qk_norm_before_rope = config.norm_gain
+        # Headwise gate: n_embd -> n_head, a matrix like the other projections.
+        self.c_gate = (
+            nn.Linear(self.n_embd, self.n_head, bias=False) if config.attn_gate else None
+        )
 
     def forward(self, x):
         B, T, C = (
@@ -85,13 +115,19 @@ class CausalSelfAttention(nn.Module):
         k = self.c_k(x).view(B, T, self.n_head, self.head_dim)
         v = self.c_v(x).view(B, T, self.n_head, self.head_dim)
         cos, sin = self.rotary(q)
+        if self.qk_norm_before_rope:
+            q, k = self.q_norm(q), self.k_norm(k)
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
-        q, k = F.rms_norm(q, (q.size(-1),)), F.rms_norm(
-            k, (k.size(-1),)
-        )  # QK norm suggested by @Grad62304977
+        if not self.qk_norm_before_rope:
+            q, k = self.q_norm(q), self.k_norm(k)
         y = F.scaled_dot_product_attention(
             q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True
-        )
+        )  # (B, n_head, T, head_dim)
+        if self.c_gate is not None:
+            # One sigmoid scalar per (position, head), scaling that head's output
+            # before the heads are mixed by c_proj.
+            gate = torch.sigmoid(self.c_gate(x))  # (B, T, n_head)
+            y = y * gate.transpose(1, 2).unsqueeze(-1)
         y = (
             y.transpose(1, 2).contiguous().view(B, T, -1)
         )  # re-assemble all head outputs side by side
@@ -115,15 +151,39 @@ class MLP(nn.Module):
         return x
 
 
+class SwiGLUMLP(nn.Module):
+    """down(SiLU(gate(x)) * up(x)), with three separate matrices (Shazeer 2020)."""
+
+    def __init__(self, config):
+        super().__init__()
+        hidden = 4 * config.n_embd
+        self.c_up = nn.Linear(config.n_embd, hidden, bias=False)
+        self.c_gate = nn.Linear(config.n_embd, hidden, bias=False)
+        self.c_down = nn.Linear(hidden, config.n_embd, bias=False)
+        self.c_down._residual_proj = True
+
+    def forward(self, x):
+        return self.c_down(F.silu(self.c_gate(x)) * self.c_up(x))
+
+
+MLP_TYPES = {"relu2": MLP, "swiglu": SwiGLUMLP}
+
+
 class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
+        if config.mlp_type not in MLP_TYPES:
+            raise ValueError(
+                f"mlp_type must be one of {sorted(MLP_TYPES)}, got {config.mlp_type!r}"
+            )
+        self.attn_norm = rms_norm(config.n_embd, config)
         self.attn = CausalSelfAttention(config)
-        self.mlp = MLP(config)
+        self.mlp_norm = rms_norm(config.n_embd, config)
+        self.mlp = MLP_TYPES[config.mlp_type](config)
 
     def forward(self, x):
-        x = x + self.attn(F.rms_norm(x, (x.size(-1),)))
-        x = x + self.mlp(F.rms_norm(x, (x.size(-1),)))
+        x = x + self.attn(self.attn_norm(x))
+        x = x + self.mlp(self.mlp_norm(x))
         return x
 
 
@@ -136,6 +196,7 @@ class GPT(nn.Module):
             dict(
                 wte=nn.Embedding(config.vocab_size, config.n_embd),
                 h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+                ln_f=rms_norm(config.n_embd, config),
             )
         )
         # Tied: there is no separate readout parameter at all -- the embedding
@@ -192,6 +253,10 @@ class GPT(nn.Module):
             )
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
 
+        elif isinstance(module, nn.RMSNorm):
+            if module.weight is not None:
+                torch.nn.init.ones_(module.weight)
+
         elif isinstance(module, Rotary):
             module.init_inv_freq()
 
@@ -207,7 +272,7 @@ class GPT(nn.Module):
         # forward pass for the rest of the model
         for block in self.transformer.h:
             x = block(x)
-        x = F.rms_norm(x, (x.size(-1),))
+        x = self.transformer.ln_f(x)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
@@ -367,9 +432,21 @@ def _apply_tp(model: GPT, tp_mesh: DeviceMesh):
             "attn.c_k": ColwiseParallel(),
             "attn.c_v": ColwiseParallel(),
             "attn.c_proj": RowwiseParallel(),
-            "mlp.c_fc": ColwiseParallel(),
-            "mlp.c_proj": RowwiseParallel(),
         }
+        if block.attn.c_gate is not None:
+            # Sharding the n_head output gives each rank its own heads' gates.
+            tp_plan["attn.c_gate"] = ColwiseParallel()
+        if isinstance(block.mlp, SwiGLUMLP):
+            tp_plan.update({
+                "mlp.c_up": ColwiseParallel(),
+                "mlp.c_gate": ColwiseParallel(),
+                "mlp.c_down": RowwiseParallel(),
+            })
+        else:
+            tp_plan.update({
+                "mlp.c_fc": ColwiseParallel(),
+                "mlp.c_proj": RowwiseParallel(),
+            })
         parallelize_module(
             block,
             tp_mesh,
@@ -411,9 +488,16 @@ def _apply_fsdp(
                 block.attn.c_k.weight: Shard(1),
                 block.attn.c_v.weight: Shard(1),
                 block.attn.c_proj.weight: Shard(0),
-                block.mlp.c_fc.weight: Shard(1),
-                block.mlp.c_proj.weight: Shard(0),
             }
+            if block.attn.c_gate is not None:
+                shard_map[block.attn.c_gate.weight] = Shard(1)
+            if isinstance(block.mlp, SwiGLUMLP):
+                shard_map[block.mlp.c_up.weight] = Shard(1)
+                shard_map[block.mlp.c_gate.weight] = Shard(1)
+                shard_map[block.mlp.c_down.weight] = Shard(0)
+            else:
+                shard_map[block.mlp.c_fc.weight] = Shard(1)
+                shard_map[block.mlp.c_proj.weight] = Shard(0)
             shard_placement_fn = lambda param: shard_map.get(param)
 
         fully_shard(

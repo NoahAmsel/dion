@@ -15,6 +15,10 @@
 #                              (A and B themselves are done -- see the stage 5 block)
 #   STAGE 6 (6 jobs)           gradient clipping at 1.0: replicas of 3 earlier jobs
 #                              at 1907 and 19073 steps, each with a named counterpart
+#   STAGE 7 (6 jobs)           stage 6's six jobs again, with SwiGLU, attention head
+#                              gates and learnable RMSNorm gains on top of clipping
+#   STAGE 8 (7 jobs)           under stage 7's recipe: normuon+GNS lr sweep, dion3
+#                              at lr 0.04, and seed-1 replicates of both at lr 0.01
 #
 #   ./sweep_normuon_418m_lr.sh
 #   STAGE=2 STAGE2_LR=0.01 ./sweep_normuon_418m_lr.sh
@@ -22,6 +26,8 @@
 #   STAGE=4 ./sweep_normuon_418m_lr.sh
 #   STAGE=5 ./sweep_normuon_418m_lr.sh
 #   STAGE=6 ./sweep_normuon_418m_lr.sh
+#   STAGE=7 ./sweep_normuon_418m_lr.sh
+#   STAGE=8 ./sweep_normuon_418m_lr.sh
 #   ./sweep_normuon_418m_lr.sh --checkpoint_freq 250   # extra args go to every run
 #
 # Results so far (1907 steps, 999,817,216 tokens, seed 0):
@@ -366,5 +372,85 @@ case "$STAGE" in
     launch dion3 0.01 0.95 --grad_clip 1.0 --ortho_fraction 0.0625 "${GNS_FLAGS[@]}" "$@"
     TAG_EXTRA=""
     ;;
-  *) echo "error: STAGE must be 1, 2, 3, 4, 5 or 6" >&2; exit 1 ;;
+  7)
+    # Stage 6's six clipped jobs with the architecture changes turned on:
+    # SwiGLU MLP (up/gate/down at 4 * d), a headwise sigmoid gate on attention,
+    # and learnable gains on every RMSNorm. Everything else is flag for flag the
+    # stage-6 job, so each pair measures the architecture change alone:
+    #
+    #   steps  job                  stage-6 counterpart (clipped)   final loss
+    #   1907   normuon     lr 0.01  17722156                        3.3179
+    #   1907   dion3 f=1/4 lr 0.01  17722157                        3.3877
+    #   1907   dion3 f=1/4 lr 0.02  17722158                        3.4209
+    #   19073  normuon     lr 0.01  17722159                        (running)
+    #   19073  dion3 f=1/4 lr 0.01  17722160                        (running)
+    #   19073  dion3 f=1/4 lr 0.02  17722161                        (pending)
+    #
+    # The new matrices (SwiGLU's three, the n_embd -> n_head gate) are
+    # orthogonalized with the rest; the gains go to AdamW with no weight decay.
+    # SwiGLU at 4 * d is 1.5x the MLP parameters (~536M total, vs 418M) and
+    # ~1.25x the per-token compute, so the walltimes are scaled up from stage 6.
+    ARCH=(--mlp_type swiglu --attn_gate --norm_gain)
+    TAG_EXTRA=",grad-clip,swiglu,attn-gate,norm-gain"
+    for steps in 1907 19073; do
+        if [[ "$steps" == 1907 ]]; then
+            TIME_LIMIT="03:30:00"; TOKENS_TAG="1b-tokens"; SCHED=()
+        else
+            # ~3.9 s/step estimated (stage 6's 3.1 x 1.25): ~21h.
+            TIME_LIMIT="26:00:00"; TOKENS_TAG="10b-tokens"
+            SCHED=(--warmup_ratio 0.02 --checkpoint_freq 3000)
+        fi
+        CLIP=(--num_iterations "$steps" --grad_clip 1.0 "${SCHED[@]}" "${ARCH[@]}")
+        launch normuon 0.01 0.95 "${CLIP[@]}" "$@"
+        launch dion3   0.01 0.95 "${CLIP[@]}" "${DION_FLAGS[@]}" "$@"
+        launch dion3   0.02 0.95 "${CLIP[@]}" "${DION_FLAGS[@]}" "$@"
+    done
+    TIME_LIMIT="02:50:00"; TOKENS_TAG="1b-tokens"; TAG_EXTRA=""
+    ;;
+  8)
+    # Retune under stage 7's recipe (grad clip 1.0 + SwiGLU + attention gate +
+    # norm gains), 1907 steps, fixing two things stage 7 left open:
+    #
+    # (a) NorMuon gets Polar Express + Gram Newton-Schulz, the routine every dion3
+    #     arm already runs. Without it normuon vs dion3 carries a routine
+    #     difference worth -0.0092 to NorMuon under the original recipe (17368303
+    #     vs 17002705). And NorMuon has never been run above lr 0.01 on the new
+    #     architecture, where dion3's lr 0.02 now ties its lr 0.01.
+    #
+    #       job                       nearest existing run
+    #       normuon+GNS  lr 0.005     none
+    #       normuon+GNS  lr 0.01      17733553 (same, no GNS)      3.2370
+    #       normuon+GNS  lr 0.02      none
+    #       normuon+GNS  lr 0.04      none
+    #
+    # (b) dion3 f=1/4 at lr 0.04, above the stage-7 tie, to tell a moved optimum
+    #     from a flat top.
+    #
+    #       dion3 f=1/4  lr 0.04      brackets 17733554 (lr 0.01)  3.3074
+    #                                          17733555 (lr 0.02)  3.3097
+    #
+    # (c) Seed 1 replicates at lr 0.01, the first between-seed noise measurement
+    #     (same-seed reruns drift ~0.002; nothing is known across seeds). Each
+    #     pairs with a seed-0 run:
+    #
+    #       normuon+GNS  lr 0.01 seed 1   vs (a)'s lr 0.01 job
+    #       dion3 f=1/4  lr 0.01 seed 1   vs 17733554                  3.3074
+    ARCH=(--grad_clip 1.0 --mlp_type swiglu --attn_gate --norm_gain)
+    TIME_LIMIT="03:30:00"   # stage 7's 1907-step jobs took 2h12m-2h18m
+    # use_polar_express / use_gram_newton_schulz never reach wandb's config, so
+    # the normuon jobs carry a gns tag to tell them apart from stage 7's normuon.
+    BASE_TAGS=",grad-clip,swiglu,attn-gate,norm-gain"
+    TAG_EXTRA="${BASE_TAGS},gns,lr-sweep"
+    for lr in 0.005 0.01 0.02 0.04; do
+        launch normuon "$lr" 0.95 "${ARCH[@]}" "${GNS_FLAGS[@]}" "$@"
+    done
+    TAG_EXTRA="${BASE_TAGS},lr-sweep"
+    launch dion3 0.04 0.95 "${ARCH[@]}" "${DION_FLAGS[@]}" "$@"
+    TAG_EXTRA="${BASE_TAGS},gns,seed1"
+    launch normuon 0.01 0.95 "${ARCH[@]}" "${GNS_FLAGS[@]}" --seed 1 "$@"
+    TAG_EXTRA="${BASE_TAGS},seed1"
+    launch dion3   0.01 0.95 "${ARCH[@]}" "${DION_FLAGS[@]}" --seed 1 "$@"
+    TIME_LIMIT="02:50:00"; TAG_EXTRA=""
+    ;;
+  *) echo "error: STAGE must be 1, 2, 3, 4, 5, 6, 7 or 8" >&2; exit 1 ;;
 esac

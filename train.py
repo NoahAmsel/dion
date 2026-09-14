@@ -54,6 +54,9 @@ class Hyperparameters:
     n_layer: int = 12
     n_head: int = 6
     tie_embeddings: bool = False
+    mlp_type: str = "relu2"  # "relu2" or "swiglu"
+    attn_gate: bool = False  # headwise sigmoid gate on the attention output
+    norm_gain: bool = False  # learnable per-dimension gain on every RMSNorm
 
     # Reproducibility
     seed: int = 0
@@ -235,6 +238,27 @@ def parse_cli_args():
         default=None,
         help="Share one matrix between the token embedding and the output head "
         "(default: off). Use --no-tie-embeddings to disable.",
+    )
+    parser.add_argument(
+        "--mlp_type",
+        type=str,
+        choices=["relu2", "swiglu"],
+        default=None,
+        help="MLP: relu2 (ReLU^2, two matrices) or swiglu (up/gate/down) (default: relu2)",
+    )
+    parser.add_argument(
+        "--attn_gate",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Gate each attention head's output by a sigmoid of a learned "
+        "n_embd -> n_head projection (default: off)",
+    )
+    parser.add_argument(
+        "--norm_gain",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Give every RMSNorm a learnable per-dimension gain, trained with the "
+        "scalar optimizer (default: off)",
     )
     parser.add_argument("--model_dim", type=int, default=None)
     parser.add_argument("--n_layer", type=int, default=None)
@@ -428,8 +452,14 @@ def init_optimizer(
     if hp.scalar_opt not in ["adamw", "lion"]:
         raise ValueError(f"Unrecognized scalar optimizer: {hp.scalar_opt}")
 
-    # Separate the model's parameters based on their types
-    matrix_params = list(model.transformer.h.parameters())
+    # Separate the model's parameters based on their types. Every 2D weight in
+    # the blocks -- including the SwiGLU and attention-gate projections -- goes
+    # to the orthogonalizing optimizer; the 1D RMSNorm gains (only present with
+    # norm_gain) go to the scalar optimizer, as does the final norm's gain.
+    block_params = list(model.transformer.h.parameters())
+    matrix_params = [p for p in block_params if p.ndim >= 2]
+    norm_params = [p for p in block_params if p.ndim < 2]
+    norm_params += list(model.transformer.ln_f.parameters())
     # Tied, one matrix serves as both embedding and readout, so it forms a
     # single group -- the readout group, whose dense gradient dominates the
     # sparse input-lookup gradient and whose lr sets the logit scale.
@@ -456,6 +486,18 @@ def init_optimizer(
             weight_decay=0,  # no weight decay for embedding parameters
         )
     )
+    if norm_params:
+        # Only appended when norm_gain is on, so runs without it keep exactly
+        # the param groups they had.
+        param_groups.append(
+            dict(
+                params=norm_params,
+                algorithm=hp.scalar_opt,
+                lr=hp.lr,
+                betas=(hp.adamw_beta1, hp.adamw_beta2),
+                weight_decay=0,  # no weight decay on norm gains
+            )
+        )
     # lm_head_lr_scale is 1.0 for adamw, so the Dion3 recipe's "AdamW runs at the
     # plain base lr" holds; it applies Dion's 1/sqrt(d_in) factor only under lion.
     lm_head_lr = hp.lr * lm_head_lr_scale(hp.scalar_opt, hp.model_dim)
@@ -915,6 +957,9 @@ def main():
         n_head=hp.n_head,
         n_embd=hp.model_dim,
         tie_embeddings=hp.tie_embeddings,
+        mlp_type=hp.mlp_type,
+        attn_gate=hp.attn_gate,
+        norm_gain=hp.norm_gain,
     )
     with torch.device("meta"):
         model = GPT(gpt_config)
