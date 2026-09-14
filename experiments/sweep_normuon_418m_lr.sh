@@ -335,6 +335,7 @@ case "$STAGE" in
     #
     # NorMuon keeps its counterparts' plain Newton-Schulz, so normuon vs dion3
     # still carries the ~0.009 routine confound from stage 5.
+    # Launched -- 1907: 17722156/7/8, 19073: 17722159/60/61. Uncomment to repeat.
     TAG_EXTRA=",grad-clip"
     for steps in 1907 19073; do
         if [[ "$steps" == 1907 ]]; then
@@ -350,6 +351,20 @@ case "$STAGE" in
         launch dion3   0.02 0.95 "${CLIP[@]}" "${DION_FLAGS[@]}" "$@"
     done
     TIME_LIMIT="02:50:00"; TOKENS_TAG="1b-tokens"; TAG_EXTRA=""
+
+    # Does clipping's benefit grow as the fraction falls? At 1907 steps it was
+    # worth -0.0111 to dion3 f=1/4 (17722157 vs 17010461) but only -0.0023 to
+    # normuon (17722156 vs 17002705). One reading: dion3 decays momentum only on
+    # selected rows, so an unclipped early spike lingers ~1/f times longer. If so,
+    # clipping should help f=1/16 clearly more than f=1/4.
+    #
+    #   steps  job                   unclipped counterpart   final loss
+    #   1907   dion3 f=1/16 lr 0.01  17225141                3.6424
+    #
+    # Same flags as the counterpart (stage 3's f=1/16 rung) plus --grad_clip 1.0.
+    TAG_EXTRA=",grad-clip,f0.0625"
+    launch dion3 0.01 0.95 --grad_clip 1.0 --ortho_fraction 0.0625 "${GNS_FLAGS[@]}" "$@"
+    TAG_EXTRA=""
     ;;
   *) echo "error: STAGE must be 1, 2, 3, 4, 5 or 6" >&2; exit 1 ;;
 esac
