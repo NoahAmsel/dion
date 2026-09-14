@@ -19,6 +19,8 @@
 #                              gates and learnable RMSNorm gains on top of clipping
 #   STAGE 8 (7 jobs)           under stage 7's recipe: normuon+GNS lr sweep, dion3
 #                              at lr 0.04, and seed-1 replicates of both at lr 0.01
+#   STAGE 9 (4 jobs)           dion3 at f=1/16 across lr 0.01-0.08 under stage 7's
+#                              recipe: a direct test of the eta/sqrt(f) rule
 #
 #   ./sweep_normuon_418m_lr.sh
 #   STAGE=2 STAGE2_LR=0.01 ./sweep_normuon_418m_lr.sh
@@ -28,6 +30,7 @@
 #   STAGE=6 ./sweep_normuon_418m_lr.sh
 #   STAGE=7 ./sweep_normuon_418m_lr.sh
 #   STAGE=8 ./sweep_normuon_418m_lr.sh
+#   STAGE=9 ./sweep_normuon_418m_lr.sh
 #   ./sweep_normuon_418m_lr.sh --checkpoint_freq 250   # extra args go to every run
 #
 # Results so far (1907 steps, 999,817,216 tokens, seed 0):
@@ -452,5 +455,25 @@ case "$STAGE" in
     launch dion3   0.01 0.95 "${ARCH[@]}" "${DION_FLAGS[@]}" --seed 1 "$@"
     TIME_LIMIT="02:50:00"; TAG_EXTRA=""
     ;;
-  *) echo "error: STAGE must be 1, 2, 3, 4, 5, 6, 7 or 8" >&2; exit 1 ;;
+  9)
+    # The paper's rule: the optimal lr for fraction f is eta/sqrt(f), eta being
+    # NorMuon's (f=1) optimum. f=1/16 is where it predicts the largest shift, 4x.
+    # Under this recipe at 1907 steps NorMuon+GNS is best at 0.02 (stage 8:
+    # 0.005 3.2681, 0.01 3.2377, 0.02 3.2235, 0.04 3.2290), so the rule puts
+    # f=1/16's optimum at 0.08. f=1/4 already disagreed -- predicted 0.04, observed
+    # 0.01-0.02 (0.01 3.3074, 0.02 3.3097, 0.04 3.3275).
+    #
+    #   dion3 f=1/16  lr 0.01 / 0.02 / 0.04 / 0.08    no counterparts at this recipe
+    #
+    # Nearest older point: 17732705 (f=1/16 lr 0.01, clipped, old architecture)
+    # 3.5526. Same flags as stage 8's dion3 runs apart from the fraction.
+    ARCH=(--grad_clip 1.0 --mlp_type swiglu --attn_gate --norm_gain)
+    TIME_LIMIT="03:30:00"
+    TAG_EXTRA=",grad-clip,swiglu,attn-gate,norm-gain,lr-rule,f0.0625"
+    for lr in 0.01 0.02 0.04 0.08; do
+        launch dion3 "$lr" 0.95 "${ARCH[@]}" --ortho_fraction 0.0625 "${GNS_FLAGS[@]}" "$@"
+    done
+    TIME_LIMIT="02:50:00"; TAG_EXTRA=""
+    ;;
+  *) echo "error: STAGE must be 1, 2, 3, 4, 5, 6, 7, 8 or 9" >&2; exit 1 ;;
 esac

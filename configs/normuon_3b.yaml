@@ -1,0 +1,69 @@
+# — Model —
+# 2,835,294,464 parameters with tie_embeddings on: 2.72B in the blocks plus one
+# shared 116M embedding/readout matrix. head_dim = 2304/18 = 128, as at 418M.
+# Same recipe as the 418M stage-7/8 runs (SwiGLU at 4 * d, headwise attention
+# gate, learnable RMSNorm gains, tied embeddings), so the gap here can be put
+# next to the 418M gap at the same token budget.
+model_dim: 2304
+n_layer: 32
+n_head: 18
+tie_embeddings: false
+sequence_length: 2048
+mlp_type: swiglu
+attn_gate: true
+norm_gain: true
+
+# — Batching & Training —
+# num_iterations = target_tokens / (batch_size * sequence_length); here
+# 10e9 / (256 * 2048) = 19073 steps = 9,999,745,024 tokens. Same 524,288
+# tokens/step as the 418M runs, packed into half as many, twice-as-long sequences.
+# The token count needs the full FineWeb10B (103 shards, 10.3B tokens): the
+# loader wraps silently, so a partial download gives extra epochs instead of an
+# error. launch_3b_10b.sh checks the shard count before submitting.
+batch_size: 256
+# 8 on 4 GPUs -> grad_accum 8. Activation memory is linear in tokens per micro-
+# batch (SDPA's flash kernel does not store the T x T attention matrix), so 8 x
+# 2048 costs what 16 x 1024 did. Fitted from the 418M new-architecture peak
+# (105,169 MiB at 64 x 1024): ~72.7 GiB of activations plus ~15 GiB of sharded
+# state is ~86 GiB of 139.8 (62%). 16 x 2048 would need ~157 GiB.
+device_batch_size: 8
+num_iterations: 19073
+
+# — Learning‐rate schedule —
+# Same as the 418M 10B-token runs (stages 6/7), so the schedules match step for step.
+warmup_ratio: 0.02
+warmdown_ratio: 0.2
+warmdown_final_ratio: 0.1
+
+# — Validation & Checkpointing —
+val_loss_every: 250
+val_tokens: 5242880
+
+# — Weights & Biases logging —
+wandb_project_name: gpt-train
+wandb_job_name: null
+no_wandb: false
+
+# — Distributed training —
+dp_size: null      # data‐parallel size
+fs_size: 4         # FSDP size -- one 4-GPU node
+
+# — Miscellaneous flags —
+debug: false
+no_compile: false
+no_triton: false
+
+# — Optimizer & Hyperparameters —
+# Polar Express + Gram Newton-Schulz for every arm, so normuon and dion3 differ
+# only in the fraction.
+optimizer: normuon
+scalar_opt: adamw
+adjust_lr: spectral_norm
+lr: 0.01
+mu: 0.95
+muon_beta2: 0.95
+nesterov: false
+weight_decay: 0.01
+grad_clip: 1.0
+use_polar_express: true
+use_gram_newton_schulz: true

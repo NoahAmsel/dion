@@ -1,6 +1,8 @@
 import argparse
+import math
 import os
 import random
+import re
 import shutil
 import time
 import tempfile
@@ -11,12 +13,13 @@ import torch.distributed.checkpoint as dcp
 import wandb
 import yaml
 
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FSDPModule
-from torch.distributed.tensor import DeviceMesh
+from torch.distributed.tensor import DeviceMesh, DTensor
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from typing import Optional
@@ -82,6 +85,7 @@ class Hyperparameters:
     weight_decay: float = 0.01
     ortho_fraction: float = 0.25
     grad_clip: float = 0.0  # max global grad norm; 0 disables clipping
+    log_weight_norms: bool = True  # per-parameter weight norms at every validation
 
     # Optimizer specific hyperparameters
     qr_method: str = "rcqr"
@@ -97,6 +101,32 @@ class Hyperparameters:
 
 # Helper function to only print on global rank 0
 MASTER_PROCESS = True
+
+
+@torch.no_grad()
+def weight_norms(model: torch.nn.Module) -> dict:
+    """Frobenius norm of every parameter, plus its RMS averaged over layers by kind.
+
+    Returns wandb-ready keys: ``weight_norm/<name>`` per parameter and
+    ``weight_rms/<name with .h.N. -> .h.*.>`` for the layer-averaged
+    ``norm / sqrt(numel)``, which is comparable across shapes. Tracks where
+    weights settle between the pull of weight decay and the optimizer's updates.
+
+    Under FSDP or TP the parameters are DTensors and their norms are collectives,
+    so every rank must call this, not just rank 0.
+    """
+    out, rms_by_kind = {}, defaultdict(list)
+    for name, p in model.named_parameters():
+        norm = torch.linalg.vector_norm(p.detach().float())
+        if isinstance(norm, DTensor):
+            norm = norm.full_tensor()
+        norm = norm.item()
+        out[f"weight_norm/{name}"] = norm
+        kind = re.sub(r"\.h\.\d+\.", ".h.*.", name)
+        rms_by_kind[kind].append(norm / math.sqrt(p.numel()))
+    for kind, values in rms_by_kind.items():
+        out[f"weight_rms/{kind}"] = sum(values) / len(values)
+    return out
 
 
 def clip_grad_norm(parameters, max_norm: float) -> torch.Tensor:
@@ -220,6 +250,13 @@ def parse_cli_args():
         "Use --no-nesterov to disable.",
     )
     parser.add_argument("--weight_decay", type=float, default=None, help="Weight decay")
+    parser.add_argument(
+        "--log_weight_norms",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Log every parameter's Frobenius norm to wandb at each validation "
+        "(default: on). Read-only: it does not change training.",
+    )
     parser.add_argument(
         "--grad_clip",
         type=float,
@@ -1174,12 +1211,19 @@ def main():
                     f" opt_avg:{total_opt_ms/timed_steps:.2f}ms)"
                 )
             print0(log_message)
+            # Same condition on every rank: the norms are collectives under FSDP/TP.
+            norms = (
+                weight_norms(raw_model)
+                if hp.log_weight_norms and not cli_args.no_wandb and not cli_args.debug
+                else {}
+            )
             if MASTER_PROCESS and not cli_args.no_wandb and not cli_args.debug:
                 wandb.log(
                     {
                         "val/loss": val_loss,
                         "step": step,
                         "time/training_time_ms": training_time_ms,  # Log total elapsed training time in ms
+                        **norms,
                     }
                 )
             pbar.set_postfix(val_loss=f"{val_loss:.4f}")
