@@ -78,6 +78,7 @@ class Hyperparameters:
     adamw_beta2: float = 0.95
     weight_decay: float = 0.01
     ortho_fraction: float = 0.25
+    grad_clip: float = 0.0  # max global grad norm; 0 disables clipping
 
     # Optimizer specific hyperparameters
     qr_method: str = "rcqr"
@@ -93,6 +94,26 @@ class Hyperparameters:
 
 # Helper function to only print on global rank 0
 MASTER_PROCESS = True
+
+
+def clip_grad_norm(parameters, max_norm: float) -> torch.Tensor:
+    """Return the global gradient norm, clipping every gradient to it if max_norm > 0.
+
+    One norm over all parameters -- Muon-managed matrices and AdamW groups alike --
+    and one coefficient min(1, max_norm / norm) applied to all of them, as
+    torch.nn.utils.clip_grad_norm_ does. Orthogonalization discards a gradient's
+    scale, but the momentum buffer it accumulates into does not, so for Muon-family
+    optimizers clipping still limits how much a single spike step contributes.
+
+    The returned norm is the pre-clip value, which is what gets logged.
+    """
+    # get_total_norm takes gradient tensors but clip_grads_with_norm_ takes the
+    # parameters and reads .grad -- handing it the gradients clips nothing.
+    params = [p for p in parameters if p.grad is not None]
+    grad_norm = torch.nn.utils.get_total_norm([p.grad for p in params])
+    if max_norm > 0:
+        torch.nn.utils.clip_grads_with_norm_(params, max_norm, grad_norm)
+    return grad_norm
 
 
 def print0(*args):
@@ -196,6 +217,12 @@ def parse_cli_args():
         "Use --no-nesterov to disable.",
     )
     parser.add_argument("--weight_decay", type=float, default=None, help="Weight decay")
+    parser.add_argument(
+        "--grad_clip",
+        type=float,
+        default=None,
+        help="Clip the global gradient norm to this value before each step (0 disables)",
+    )
     parser.add_argument(
         "--time_optimizer", action="store_true",
         help="Time fwd/bwd and optimizer step separately (adds cuda.synchronize between them)",
@@ -791,6 +818,10 @@ def main():
     if hp.checkpoint_freq > 0:
         if not hp.checkpoint_dir:
             raise ValueError("Must specify --checkpoint_dir to save checkpoints")
+    if hp.grad_clip > 0 and hp.replicate_mesh_grad_sync:
+        # Gradients are not synchronized across the replicate mesh in this mode, so
+        # each rank would compute its own norm and clip by a different coefficient.
+        raise ValueError("--grad_clip is not supported with replicate_mesh_grad_sync")
 
     # Seed before any model construction or optimizer state allocation.
     set_seed(hp.seed)
@@ -990,6 +1021,7 @@ def main():
     print0(
         f"Checkpoint frequency: {hp.checkpoint_freq if hp.checkpoint_freq > 0 else 'disabled'}"
     )
+    print0(f"Gradient clipping: {hp.grad_clip if hp.grad_clip > 0 else 'disabled'}")
 
     # Load the latest checkpoint if it exists
     if hp.checkpoint_dir:
@@ -1149,10 +1181,9 @@ def main():
             fwd_bwd_ms = 1000 * (time.perf_counter() - t_fwd_bwd)
             t_opt = time.perf_counter()
 
-        # Gradient norm + optimizer step
-        grad_norm = torch.nn.utils.get_total_norm(
-            [p.grad for p in model.parameters() if p.grad is not None]
-        )
+        # Gradient norm (+ clipping) + optimizer step. Runs after the last
+        # micro-batch, so the gradients are fully accumulated and synchronized.
+        grad_norm = clip_grad_norm(model.parameters(), hp.grad_clip)
         # The learning rate this step actually used: the matrix group's base lr
         # scaled by the warmup/warmdown schedule. Read before lr_scheduler.step(),
         # which advances the groups to the *next* step's value.

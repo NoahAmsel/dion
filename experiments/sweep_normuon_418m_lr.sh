@@ -13,12 +13,15 @@
 #                              (resumes the 4B runs; 1B and 4B already done)
 #   STAGE 5 (1 job)            experiment A follow-up: isolate Polar Express
 #                              (A and B themselves are done -- see the stage 5 block)
+#   STAGE 6 (6 jobs)           gradient clipping at 1.0: replicas of 3 earlier jobs
+#                              at 1907 and 19073 steps, each with a named counterpart
 #
 #   ./sweep_normuon_418m_lr.sh
 #   STAGE=2 STAGE2_LR=0.01 ./sweep_normuon_418m_lr.sh
 #   STAGE=3 ./sweep_normuon_418m_lr.sh
 #   STAGE=4 ./sweep_normuon_418m_lr.sh
 #   STAGE=5 ./sweep_normuon_418m_lr.sh
+#   STAGE=6 ./sweep_normuon_418m_lr.sh
 #   ./sweep_normuon_418m_lr.sh --checkpoint_freq 250   # extra args go to every run
 #
 # Results so far (1907 steps, 999,817,216 tokens, seed 0):
@@ -312,5 +315,41 @@ case "$STAGE" in
     # launch normuon 0.01 0.9 --muon_beta2 0.9 "$@"
     # TAG_EXTRA=""
     ;;
-  *) echo "error: STAGE must be 1, 2, 3, 4 or 5" >&2; exit 1 ;;
+  6)
+    # Gradient clipping at global norm 1.0 (all parameters), as in the private
+    # code. Each job repeats an earlier unclipped job flag for flag, so each pair
+    # measures the effect of clipping alone:
+    #
+    #   steps  job                  unclipped counterpart              final loss
+    #   1907   normuon     lr 0.01  17002705                           3.3202
+    #   1907   dion3 f=1/4 lr 0.01  17010461                           3.3988
+    #   1907   dion3 f=1/4 lr 0.02  17010463                           3.4167
+    #   19073  normuon     lr 0.01  17309781 -> resumed as 17330992    2.9474
+    #   19073  dion3 f=1/4 lr 0.01  17309782 -> resumed as 17330993    2.9614
+    #   19073  dion3 f=1/4 lr 0.02  none -- never run unclipped
+    #
+    # The 19073-step counterparts trained steps 0-6000 as 4B runs, so their warmup
+    # was 381 steps (5% of 7628), not the 954 a fresh 19073-step run would get.
+    # --warmup_ratio 0.02 gives round(0.02 * 19073) = 381, and cooldown still
+    # starts at 15258: the lr is identical to theirs at every step.
+    #
+    # NorMuon keeps its counterparts' plain Newton-Schulz, so normuon vs dion3
+    # still carries the ~0.009 routine confound from stage 5.
+    TAG_EXTRA=",grad-clip"
+    for steps in 1907 19073; do
+        if [[ "$steps" == 1907 ]]; then
+            TIME_LIMIT="02:50:00"; TOKENS_TAG="1b-tokens"; SCHED=()
+        else
+            # The counterparts ran at 3.11 s/step including validation: ~16.5h.
+            TIME_LIMIT="20:00:00"; TOKENS_TAG="10b-tokens"
+            SCHED=(--warmup_ratio 0.02 --checkpoint_freq 3000)
+        fi
+        CLIP=(--num_iterations "$steps" --grad_clip 1.0 "${SCHED[@]}")
+        launch normuon 0.01 0.95 "${CLIP[@]}" "$@"
+        launch dion3   0.01 0.95 "${CLIP[@]}" "${DION_FLAGS[@]}" "$@"
+        launch dion3   0.02 0.95 "${CLIP[@]}" "${DION_FLAGS[@]}" "$@"
+    done
+    TIME_LIMIT="02:50:00"; TOKENS_TAG="1b-tokens"; TAG_EXTRA=""
+    ;;
+  *) echo "error: STAGE must be 1, 2, 3, 4, 5 or 6" >&2; exit 1 ;;
 esac

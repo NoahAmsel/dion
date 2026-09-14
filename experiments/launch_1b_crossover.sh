@@ -15,7 +15,8 @@
 # TFLOP/s, inside the 30h default walltime. To resume one that dies anyway:
 #   sbatch --job-name=normuon_1b --gres=gpu:4 --cpus-per-task=32 --mem=256GB \
 #       --time=30:00:00 submit_train.slurm --config configs/normuon_1b.yaml \
-#       --optimizer normuon --lr 0.01 --checkpoint_freq 3000 --no_wandb \
+#       --optimizer normuon --lr 0.01 --use_polar_express --use_gram_newton_schulz \
+#       --checkpoint_freq 3000 --no_wandb \
 #       --checkpoint_dir /scratch/nia4240/dion/checkpoints/<RUN>
 # --no_wandb because the checkpoint carries the wandb id with resume="must", so
 # a resumed job would re-log steps the original already wrote.
@@ -28,10 +29,8 @@ cd "$(dirname "$(readlink -f "$0")")/.."
 GRES="${GRES:-gpu:4}"
 TIME_LIMIT="${TIME_LIMIT:-30:00:00}"
 
-# dion3 only: Muon and NorMuon take neither ortho_fraction nor
-# use_gram_newton_schulz. Note that the baseline therefore runs the Triton
-# Newton-Schulz while these run Polar Express + Gram Newton-Schulz; add
-# "${GNS_FLAGS[@]}" to the normuon launch if you want to match them.
+# Every arm runs Polar Express + Gram Newton-Schulz, which has a small beneficial effect on final loss.
+# --ortho_fraction is dion3 only.
 GNS_FLAGS=(--use_polar_express --use_gram_newton_schulz)
 DION_FLAGS=(--ortho_fraction 0.125 "${GNS_FLAGS[@]}")
 
@@ -53,6 +52,6 @@ launch() {
             "$@"
 }
 
-launch normuon 0.01     baseline    "$@"
+launch normuon 0.01     baseline    "${GNS_FLAGS[@]}" "$@"
 launch dion3   0.01     f8-baselr   "${DION_FLAGS[@]}" "$@"
 launch dion3   0.028284 f8-sqrtf-lr "${DION_FLAGS[@]}" "$@"   # 0.01 * sqrt(8)
