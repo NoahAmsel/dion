@@ -21,6 +21,8 @@
 #                              at lr 0.04, and seed-1 replicates of both at lr 0.01
 #   STAGE 9 (4 jobs)           dion3 at f=1/16 across lr 0.01-0.08 under stage 7's
 #                              recipe: a direct test of the eta/sqrt(f) rule
+#   STAGE 10 (1 job)           normuon at lr 0.02 over 10B tokens, the missing arm
+#                              of stage 7, keeping checkpoints to branch cooldowns from
 #
 #   ./sweep_normuon_418m_lr.sh
 #   STAGE=2 STAGE2_LR=0.01 ./sweep_normuon_418m_lr.sh
@@ -31,6 +33,7 @@
 #   STAGE=7 ./sweep_normuon_418m_lr.sh
 #   STAGE=8 ./sweep_normuon_418m_lr.sh
 #   STAGE=9 ./sweep_normuon_418m_lr.sh
+#   STAGE=10 ./sweep_normuon_418m_lr.sh
 #   ./sweep_normuon_418m_lr.sh --checkpoint_freq 250   # extra args go to every run
 #
 # Results so far (1907 steps, 999,817,216 tokens, seed 0):
@@ -475,5 +478,46 @@ case "$STAGE" in
     done
     TIME_LIMIT="02:50:00"; TAG_EXTRA=""
     ;;
-  *) echo "error: STAGE must be 1, 2, 3, 4, 5, 6, 7, 8 or 9" >&2; exit 1 ;;
+  10)
+    # Stage 7's 10B runs all used lr 0.01, but under this recipe normuon is best at
+    # 0.02 at 1B tokens (stage 8: 0.01 3.2377 vs 0.02 3.2235). So the +0.0116 gap at
+    # 10B (17733556 2.8958 vs 17733557 2.9080) may be measured against an
+    # under-tuned normuon. This is the same job as 17733556 with --lr 0.02, and it
+    # also pairs with dion3 at lr 0.02 (17733558, 2.9074), which has no normuon partner.
+    #
+    # --checkpoint_steps keeps permanent checkpoints (checkpoint-<step>, never
+    # overwritten, unlike --checkpoint_freq's rolling one) at the points where a
+    # shorter run's cooldown would begin. A 10B curve read at 1B tokens is not a
+    # 1B-token run: it has not been annealed. Branching from these gives real
+    # endpoints at 0.5/1/2/4/8B tokens, ~20% of each budget in extra compute.
+    #
+    #   branch step   simulates       cooldown
+    #        763      0.5B tokens     954 steps total
+    #       1526      1B  tokens     1907
+    #       3052      2B  tokens     3815
+    #       6103      4B  tokens     7629
+    #      12207      8B  tokens    15259
+    #
+    # To run one (the schedule is rebuilt from --num_iterations and fast-forwarded
+    # to the loaded step, so the cooldown lands where the table says):
+    #   sbatch --job-name=normuon_418m --time=02:00:00 submit_train.slurm \
+    #       --config configs/normuon_418m.yaml --optimizer normuon --lr 0.02 --mu 0.95 \
+    #       --grad_clip 1.0 --mlp_type swiglu --attn_gate --norm_gain \
+    #       --use_polar_express --use_gram_newton_schulz --warmup_ratio 0.02 \
+    #       --num_iterations 1907 --no_wandb --checkpoint_freq 0 \
+    #       --checkpoint_dir <parent job dir> --checkpoint_name checkpoint-1526
+    # Caveat: warmup stays the parent's 381 steps, where a native 1907-step run
+    # would use 5% = 95, so the shortest branches are not exact replicas.
+    #
+    # ~7 GB per checkpoint, so ~35 GB for the five, plus the rolling one.
+    ARCH=(--grad_clip 1.0 --mlp_type swiglu --attn_gate --norm_gain)
+    TIME_LIMIT="26:00:00"          # stage 7's 10B runs took ~22h
+    TOKENS_TAG="10b-tokens"
+    TAG_EXTRA=",grad-clip,swiglu,attn-gate,norm-gain,gns,lr-tune"
+    launch normuon 0.02 0.95 "${ARCH[@]}" "${GNS_FLAGS[@]}" \
+        --num_iterations 19073 --warmup_ratio 0.02 \
+        --checkpoint_freq 2000 --checkpoint_steps 763,1526,3052,6103,12207 "$@"
+    TIME_LIMIT="02:50:00"; TOKENS_TAG="1b-tokens"; TAG_EXTRA=""
+    ;;
+  *) echo "error: STAGE must be 1, 2, 3, 4, 5, 6, 7, 8, 9 or 10" >&2; exit 1 ;;
 esac

@@ -22,7 +22,7 @@ from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DeviceMesh, DTensor
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
-from typing import Optional
+from typing import Optional, Tuple
 
 from models.gpt_model import GPT, GPTConfig, parallelize_gpt_model
 from models.gpt_utils import DistributedDataLoader
@@ -68,6 +68,9 @@ class Hyperparameters:
     val_loss_every: int = 125
     val_tokens: int = 10485760
     checkpoint_freq: int = 0
+    # Comma-separated steps to keep a checkpoint at, e.g. "1526,3052". Unlike
+    # checkpoint_freq's rolling checkpoint these are never overwritten.
+    checkpoint_steps: str = ""
     checkpoint_dir: str = None
     wandb_project_name: str = "dion-test"
 
@@ -127,6 +130,21 @@ def weight_norms(model: torch.nn.Module) -> dict:
     for kind, values in rms_by_kind.items():
         out[f"weight_rms/{kind}"] = sum(values) / len(values)
     return out
+
+
+def parse_checkpoint_steps(spec: str) -> Tuple[int, ...]:
+    """Parse "1526, 3052" into (1526, 3052). Empty or None gives ()."""
+    if not spec:
+        return ()
+    steps = []
+    for piece in str(spec).split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        if not piece.isdigit():
+            raise ValueError(f"--checkpoint_steps takes non-negative integers, got {piece!r}")
+        steps.append(int(piece))
+    return tuple(sorted(set(steps)))
 
 
 def clip_grad_norm(parameters, max_norm: float) -> torch.Tensor:
@@ -209,7 +227,21 @@ def parse_cli_args():
         "--checkpoint_freq",
         type=int,
         default=None,
-        help="Checkpoint every N steps, 0 to disable",
+        help="Rolling recovery checkpoint every N steps (overwritten each time), 0 to disable",
+    )
+    parser.add_argument(
+        "--checkpoint_steps",
+        type=str,
+        default=None,
+        help="Comma-separated steps to keep a permanent checkpoint at, saved as "
+        "checkpoint-<step> and never overwritten (e.g. to branch a cooldown from)",
+    )
+    parser.add_argument(
+        "--checkpoint_name",
+        type=str,
+        default=None,
+        help="Checkpoint to resume from within --checkpoint_dir (default: the "
+        "rolling checkpoint if present, else the highest-numbered checkpoint-<step>)",
     )
 
     # ---------- optimizer ----------
@@ -852,12 +884,30 @@ class CheckpointManager:
             shutil.move(tmpdir, checkpoint_path)
         dist.barrier()
 
+    def _resume_name(self) -> str:
+        """The rolling checkpoint if it exists, else the highest checkpoint-<step>.
+
+        The rolling one is written more often, so it is normally the newest; the
+        step-tagged ones are what a run with --checkpoint_steps leaves behind.
+        """
+        if os.path.isdir(os.path.join(self.checkpoint_dir, self.DEFAULT_NAME)):
+            return self.DEFAULT_NAME
+        prefix = self.DEFAULT_NAME + "-"
+        steps = []
+        if os.path.isdir(self.checkpoint_dir):
+            for entry in os.listdir(self.checkpoint_dir):
+                suffix = entry[len(prefix):]
+                if entry.startswith(prefix) and suffix.isdigit():
+                    if os.path.isdir(os.path.join(self.checkpoint_dir, entry)):
+                        steps.append(int(suffix))
+        return f"{prefix}{max(steps)}" if steps else self.DEFAULT_NAME
+
     def load(self, name: Optional[str] = None, allow_missing: bool = False):
         """
         Load the checkpoint from the path "self.checkpoint_dir/name/".
         """
         assert self.checkpoint_dir, "Checkpoint directory must be specified"
-        name = name or self.DEFAULT_NAME
+        name = name or self._resume_name()
         checkpoint_path = os.path.join(self.checkpoint_dir, name)
 
         if not os.path.isdir(checkpoint_path):
@@ -894,7 +944,8 @@ def main():
     hp = Hyperparameters()
     hp = override_args_from_cli(hp, cli_args)
 
-    if hp.checkpoint_freq > 0:
+    checkpoint_steps = parse_checkpoint_steps(hp.checkpoint_steps)
+    if hp.checkpoint_freq > 0 or checkpoint_steps:
         if not hp.checkpoint_dir:
             raise ValueError("Must specify --checkpoint_dir to save checkpoints")
     if hp.grad_clip > 0 and hp.replicate_mesh_grad_sync:
@@ -1104,10 +1155,12 @@ def main():
         f"Checkpoint frequency: {hp.checkpoint_freq if hp.checkpoint_freq > 0 else 'disabled'}"
     )
     print0(f"Gradient clipping: {hp.grad_clip if hp.grad_clip > 0 else 'disabled'}")
+    if checkpoint_steps:
+        print0(f"Permanent checkpoints at steps: {list(checkpoint_steps)}")
 
     # Load the latest checkpoint if it exists
     if hp.checkpoint_dir:
-        checkpoint_manager.load(allow_missing=True)
+        checkpoint_manager.load(name=cli_args.checkpoint_name, allow_missing=True)
         if checkpoint_manager.step is not None:
             print0(f"Resuming from step {checkpoint_manager.step}")
         else:
@@ -1308,7 +1361,14 @@ def main():
         pbar.update(1)
         pbar.set_postfix(train_loss=f"{train_loss.item():.4f}")
 
+        # The rolling checkpoint is for recovery and is overwritten; the ones named
+        # for their step are kept, so a later job can branch from them.
+        save_names = []
         if hp.checkpoint_freq > 0 and step % hp.checkpoint_freq == 0 and step > 0:
+            save_names.append(None)
+        if step in checkpoint_steps and step > 0:
+            save_names.append(f"{checkpoint_manager.DEFAULT_NAME}-{step}")
+        if save_names:
             # See if optimizer defines synchronize_for_checkpoint()
             if hasattr(optimizer, "synchronize_for_checkpoint"):
                 # Dion with replicate_mesh_grad_sync will have decoupled optimizer states
@@ -1317,7 +1377,8 @@ def main():
                 optimizer.synchronize_for_checkpoint()
 
             # Save a distributed checkpoint
-            checkpoint_manager.save(step=step)
+            for name in save_names:
+                checkpoint_manager.save(name=name, step=step)
 
     pbar.close()
     print0(
