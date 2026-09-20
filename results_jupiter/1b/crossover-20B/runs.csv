@@ -1,0 +1,6 @@
+arm,label,slurm_job,wandb_run,optimizer,ortho_fraction,matrix_lr,scalar_lr,num_iterations,tokens,final_val_loss,mean_step_ms,mean_mfu_pct,val_points,per_step_rows
+normuon_f1_lr0.01,"NorMuon f=1, lr 0.01 (baseline)",1752193,03k3n1c3,normuon,1.0,0.01,0.01,38147,20000014336,2.7323,545.65,43.61,78,38225
+dion3_f0.125_lr0.01,"Dion3 f=1/8, lr 0.01",1752194,h3q2tf8x,dion3,0.125,0.01,0.01,38147,20000014336,2.7394,528.83,44.94,78,38225
+dion3_f0.125_scalarlr_sqrtf,"Dion3 f=1/8, scalar lr x sqrt(8) only",1763863,57h8cv7y,dion3,0.125,0.01,0.028284,38147,20000014336,2.8239,533.51,44.56,78,38225
+dion3_f0.125_matrixlr_sqrtf,"Dion3 f=1/8, matrix lr x sqrt(8) only",1763916,2wjeh4ts,dion3,0.125,0.028284,0.01,38147,20000014336,2.7543,538.27,44.16,78,38225
+dion3_f0.125_bothlr_sqrtf,"Dion3 f=1/8, both groups x sqrt(8)",1752196,spfw9wlj,dion3,0.125,0.028284,0.028284,38147,20000014336,2.8757,536.51,44.29,78,38225
