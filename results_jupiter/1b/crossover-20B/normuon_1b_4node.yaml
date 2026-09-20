@@ -1,0 +1,70 @@
+# 1B / 20B-token crossover run, sized for FOUR JUPITER nodes (16x GH200).
+#
+# Identical to normuon_1b.yaml in model, tokens, schedule and optimizer. The
+# only changes are the parallelism layout and the resulting grad-accum, so the
+# arms remain comparable to the single-node config.
+#
+# WHY HSDP (dp 4 x fs 4) AND NOT FLAT fs_size 16.
+# train.py builds init_device_mesh(mesh_shape=(dp, fs, tp)), and the last mesh
+# dim varies fastest, so with 4 ranks per node the "fs" group is exactly the 4
+# GPUs of ONE node and the "dp" group spans nodes. That matters here because
+# NorDion2 is handed `outer_shard_mesh` ("fs") as its distributed_mesh, so its
+# megabatch all_to_all stays on NVLink and never touches InfiniBand. Only FSDP's
+# gradient all-reduce crosses the fabric, once per step. Flat fs_size 16 would
+# instead put the optimizer's all_to_all on IB every step.
+#
+# Memory is unchanged from the single-node config: the parameter/optimizer shard
+# is still 1/4 (fs_size 4, not 1/16), and device_batch_size is untouched, so the
+# ~64 GiB/GPU fit still holds on a 95 GiB GH200.
+
+# — Model —
+model_dim: 1792
+n_layer: 24
+n_head: 16
+tie_embeddings: false
+sequence_length: 1024
+
+# — Batching & Training —
+# data_parallel_size = dp * fs = 16, so
+# grad_accum = batch_size / (16 * device_batch_size) = 512 / 512 = 1.
+# tokens/step = 32 * 1024 * 16 = 524,288, identical to the single-node config.
+# val_tokens / tokens_in_global_batch = 5242880 / 524288 = 10, an integer, which
+# train.py asserts.
+batch_size: 512
+device_batch_size: 32
+num_iterations: 38147
+
+# — Learning-rate schedule —
+warmup_ratio: 0.01
+warmdown_ratio: 0.25
+warmdown_final_ratio: 0.1
+
+# — Validation & Checkpointing —
+val_loss_every: 500
+val_tokens: 5242880
+
+# — Weights & Biases logging —
+wandb_project_name: gpt-train
+wandb_job_name: null
+no_wandb: false
+
+# — Distributed training —
+dp_size: 4         # replicate across the 4 nodes (IB): FSDP grad all-reduce only
+fs_size: 4         # shard within a node (NVLink): params/grads/opt state + the
+                   # NorDion2 megabatch all_to_all
+tp_size: 1
+
+# — Miscellaneous flags —
+debug: false
+no_compile: false
+no_triton: false
+
+# — Optimizer & Hyperparameters —
+optimizer: normuon
+scalar_opt: adamw
+adjust_lr: spectral_norm
+lr: 0.01
+mu: 0.95
+muon_beta2: 0.95
+nesterov: false
+weight_decay: 0.01
