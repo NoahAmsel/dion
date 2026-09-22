@@ -204,3 +204,38 @@ def test_optimizer_groups_matrices_and_gains(gloo_world, monkeypatch, kw):
 
     expected_groups = 4 if kw.get("norm_gain") else 3
     assert len(opt.param_groups) == expected_groups
+
+
+# ---------------------------------------------------------------- scalar_lr
+
+
+@pytest.mark.parametrize(
+    "scalar_lr, expected", [(0.0, 0.02), (0.01, 0.01)],
+    ids=["follows_lr", "decoupled"],
+)
+def test_scalar_lr_sets_only_the_adamw_groups(gloo_world, monkeypatch, scalar_lr, expected):
+    """An eta/sqrt(f) sweep on one global lr moves the AdamW groups too, and that
+    side carries most of the penalty. --scalar_lr holds them still; 0 keeps the
+    old behaviour of following --lr."""
+    import train
+    from torch.nn.parallel import DistributedDataParallel as DDP
+
+    monkeypatch.setattr(sys, "argv", ["train.py", "--no_triton"])
+    cli = train.parse_cli_args()
+    hp = train.Hyperparameters()
+    hp.optimizer, hp.scalar_opt, hp.lr, hp.scalar_lr = "normuon", "adamw", 0.02, scalar_lr
+    hp.norm_gain = True
+    model = _model(**ALL_ON)
+    opt = train.init_optimizer(model, None, DDP(model), hp, cli)
+
+    kinds = {}
+    names = {id(p): n for n, p in model.named_parameters()}
+    for g in opt.param_groups:
+        for p in g["params"]:
+            kinds[names[id(p)]] = (g.get("algorithm", "matrix"), g.get("lr"))
+    for name, (algorithm, lr) in kinds.items():
+        if algorithm == "adamw":
+            assert lr == pytest.approx(expected), f"{name} at {lr}"
+    # The matrix group keeps the base lr whatever scalar_lr does; adjust_lr scales
+    # it per parameter inside the optimizer, not here.
+    assert opt.param_groups[0].get("lr", hp.lr) == pytest.approx(0.02)

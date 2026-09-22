@@ -1,0 +1,74 @@
+# — Model —
+# 482,672,640 parameters, untied: 354M in the blocks plus separate 64M embedding
+# and readout matrices. head_dim = 1280/10 = 128.
+#
+# The middle of the size axis for the NorMuon vs Dion3 comparison, between
+# normuon_225m.yaml and the external 1B runs (normuon_1b_4node.yaml). Matched to
+# those runs on everything but geometry: ReLU^2 MLP, no gradient clipping, untied
+# embeddings, 1% warmup, 25% warmdown, Polar Express + Gram Newton-Schulz on
+# every arm. Deliberately not our best recipe -- SwiGLU, the attention gate, norm
+# gains and clipping all help, but the external 1B runs lack them, and matching
+# is what puts three model sizes on one axis.
+#
+# Separate from configs/normuon_418m.yaml, which stages 1-10 of
+# experiments/sweep_normuon_418m_lr.sh use and which stays as it was: tied
+# embeddings, 5% warmup, 20% warmdown, 1907/19073-step budgets.
+model_dim: 1280
+n_layer: 18
+n_head: 10
+tie_embeddings: false
+sequence_length: 1024
+
+# — Batching & Training —
+# 38147 steps x 512 x 1024 = 20.0B tokens. Needs FineWeb100B: FineWeb10B holds
+# 10.26B tokens and the loader wraps silently, which would leave the 20B point
+# as the only multi-epoch one on the budget axis.
+batch_size: 512
+# 64 -> grad_accum 8 on one GPU. ~1013 MiB per sequence plus ~10 GiB of
+# parameter and optimizer state is ~75 GiB of a 139.8 GiB GH200; 128 would need
+# ~140 GiB. Measured peak at this device batch under the old architecture: 73.8 GiB.
+device_batch_size: 64
+num_iterations: 38147
+
+# — Learning‐rate schedule —
+# 1% warmup = 381 steps, inherited unchanged by every cooldown branched off this
+# run, so warmup is not confounded with budget. Warmdown over the last 25% to
+# 10% of peak, starting at step 28610.
+warmup_ratio: 0.01
+warmdown_ratio: 0.25
+warmdown_final_ratio: 0.1
+
+# — Validation & Checkpointing —
+# Every 250 steps: denser than the external runs' 500, which keeps the
+# equal-loss crossings in experiments/plot_token_gap.py from jumping between
+# widely spaced validation points. ~1.5% of runtime.
+val_loss_every: 250
+val_tokens: 5242880
+
+# — Weights & Biases logging —
+wandb_project_name: gpt-train
+wandb_job_name: null
+no_wandb: false
+
+# — Distributed training —
+dp_size: null      # data‐parallel size
+fs_size: null      # FSDP size
+
+# — Miscellaneous flags —
+debug: false
+no_compile: false
+no_triton: false
+
+# — Optimizer & Hyperparameters —
+# Polar Express + Gram Newton-Schulz for every arm, baseline included: leaving
+# NorMuon on Triton Newton-Schulz confounds the comparison by ~0.009 nats.
+optimizer: normuon
+scalar_opt: adamw
+adjust_lr: spectral_norm
+lr: 0.01
+mu: 0.95
+muon_beta2: 0.95
+nesterov: false
+weight_decay: 0.01
+use_polar_express: true
+use_gram_newton_schulz: true

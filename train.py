@@ -80,6 +80,12 @@ class Hyperparameters:
 
     # Main optimizer hyperparameters
     lr: float = 0.02
+    # Learning rate for the AdamW (non-matrix) groups: embeddings, lm_head and
+    # norm gains. 0 means "follow lr", which is the Dion3 recipe and what every
+    # run before this flag did. Set it to hold those groups fixed while the
+    # matrix lr moves -- an eta/sqrt(f) sweep on a single global lr scales both,
+    # and the scalar side carries most of the penalty.
+    scalar_lr: float = 0.0
     mu: float = 0.95
     muon_beta2: float = 0.95  # NorMuon / NorDion2 second-moment decay
     nesterov: bool = True
@@ -130,6 +136,19 @@ def weight_norms(model: torch.nn.Module) -> dict:
     for kind, values in rms_by_kind.items():
         out[f"weight_rms/{kind}"] = sum(values) / len(values)
     return out
+
+
+def select_wandb_id(stored_id: Optional[str], fresh: bool) -> Tuple[Optional[str], str]:
+    """(id, resume mode) for wandb.init.
+
+    A checkpoint carries the wandb id of the run that wrote it, and resuming with
+    it continues that run -- right for a job that picks up where it left off,
+    wrong for a branch, which would rewrite the parent's history from the branch
+    point on. --fresh_wandb_run gives the branch its own run instead.
+    """
+    if fresh or not stored_id:
+        return None, "never"
+    return stored_id, "must"
 
 
 def parse_checkpoint_steps(spec: str) -> Tuple[int, ...]:
@@ -237,6 +256,13 @@ def parse_cli_args():
         "checkpoint-<step> and never overwritten (e.g. to branch a cooldown from)",
     )
     parser.add_argument(
+        "--fresh_wandb_run",
+        action="store_true",
+        help="Start a new wandb run instead of resuming the one stored in the "
+        "checkpoint. Use when branching a shorter run off a checkpoint, so the "
+        "branch gets its own curve rather than overwriting the parent's.",
+    )
+    parser.add_argument(
         "--checkpoint_name",
         type=str,
         default=None,
@@ -280,6 +306,13 @@ def parse_cli_args():
         default=None,
         help="Nesterov momentum for Muon, NorMuon, and MuonReference (default: on). "
         "Use --no-nesterov to disable.",
+    )
+    parser.add_argument(
+        "--scalar_lr",
+        type=float,
+        default=None,
+        help="Learning rate for the AdamW groups (embeddings, lm_head, norm gains); "
+        "0 or unset means follow --lr",
     )
     parser.add_argument("--weight_decay", type=float, default=None, help="Weight decay")
     parser.add_argument(
@@ -546,11 +579,14 @@ def init_optimizer(
     # Dion3 recipe: the AdamW groups run at the plain base learning rate -- no
     # shape-dependent scaling and no separate knob -- while the matrix groups get
     # the sqrt(d_out / d_in) factor via adjust_lr. Weight decay is matrix-only.
+    # scalar_lr overrides that base rate for these groups only; 0 keeps them tied
+    # to hp.lr, which is what the recipe says and what earlier runs did.
+    scalar_lr = hp.scalar_lr if hp.scalar_lr > 0 else hp.lr
     param_groups.append(
         dict(
             params=embedding_params,
             algorithm=hp.scalar_opt,
-            lr=hp.lr,  # no LR adjustment for embedding parameters
+            lr=scalar_lr,  # no LR adjustment for embedding parameters
             betas=(hp.adamw_beta1, hp.adamw_beta2),
             weight_decay=0,  # no weight decay for embedding parameters
         )
@@ -562,14 +598,14 @@ def init_optimizer(
             dict(
                 params=norm_params,
                 algorithm=hp.scalar_opt,
-                lr=hp.lr,
+                lr=scalar_lr,
                 betas=(hp.adamw_beta1, hp.adamw_beta2),
                 weight_decay=0,  # no weight decay on norm gains
             )
         )
     # lm_head_lr_scale is 1.0 for adamw, so the Dion3 recipe's "AdamW runs at the
     # plain base lr" holds; it applies Dion's 1/sqrt(d_in) factor only under lion.
-    lm_head_lr = hp.lr * lm_head_lr_scale(hp.scalar_opt, hp.model_dim)
+    lm_head_lr = scalar_lr * lm_head_lr_scale(hp.scalar_opt, hp.model_dim)
     param_groups.append(
         dict(
             params=lm_head_params,
@@ -1096,6 +1132,10 @@ def main():
     # --- Optimizer Setup ---
     print0(f"Optimizer: {hp.optimizer}")
     print0(f"Scalar optimizer: {hp.scalar_opt}")
+    print0(
+        "Scalar (AdamW) group lr: "
+        + (f"{hp.scalar_lr} (decoupled from lr {hp.lr})" if hp.scalar_lr > 0 else f"{hp.lr} (follows lr)")
+    )
     print0(f"Base learning rate: {hp.lr}")
 
     optimizer = init_optimizer(
@@ -1176,17 +1216,22 @@ def main():
         assert hp.wandb_project_name, "wandb project name is required"
         if MASTER_PROCESS:
             # Check if we already have a wandb ID from the checkpoint
-            wandb_id = checkpoint_manager.wandb_id
-            resume = "must" if wandb_id else "never"
+            parent_id = checkpoint_manager.wandb_id
+            wandb_id, resume = select_wandb_id(parent_id, cli_args.fresh_wandb_run)
             wandb.login(
                 key=os.environ.get("WANDB_API_KEY"),
                 host=os.environ.get("WANDB_HOST"),
                 timeout=0,
             )
+            # Record where a branch came from, since its curve starts mid-training.
+            run_config = dict(hp.__dict__)
+            if cli_args.fresh_wandb_run and parent_id:
+                run_config["branched_from_wandb_id"] = parent_id
+                run_config["branched_from_checkpoint"] = cli_args.checkpoint_name or "latest"
             wandb.init(
                 project=hp.wandb_project_name,
                 name=run_name,
-                config=hp.__dict__,
+                config=run_config,
                 id=wandb_id,
                 resume=resume,
             )

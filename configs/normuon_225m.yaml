@@ -1,0 +1,67 @@
+# — Model —
+# 225,006,592 parameters, untied: 135M in the blocks plus separate 90M embedding
+# and readout matrices. head_dim = 896/7 = 128, as in every other config here.
+#
+# The small end of the size axis for the NorMuon vs Dion3 comparison. Everything
+# here matches the external 1B/20B runs (configs/normuon_1b_4node.yaml) except
+# the model geometry: ReLU^2 MLP, no gradient clipping, untied embeddings,
+# 1% warmup, 25% warmdown, Polar Express + Gram Newton-Schulz on every arm. That
+# is deliberately NOT our best recipe -- matching theirs is what lets 225M, 418M
+# and their 1.1B sit on one size axis.
+model_dim: 896
+n_layer: 14
+n_head: 7
+tie_embeddings: false
+sequence_length: 1024
+
+# — Batching & Training —
+# 38147 steps x 512 x 1024 = 20.0B tokens, the external runs' budget. Needs
+# FineWeb100B: FineWeb10B holds 10.26B tokens and the loader wraps silently,
+# which would make the 20B point the only multi-epoch one on the budget axis.
+batch_size: 512
+# 128 -> grad_accum 4 on one GPU. ~584 MiB per sequence by the fit in
+# experiments/launch_3b_10b.sh, so ~80 GiB of a 139.8 GiB GH200.
+device_batch_size: 128
+num_iterations: 38147
+
+# — Learning‐rate schedule —
+# 1% warmup = 381 steps, held fixed for every cooldown branched off this run, so
+# warmup is not confounded with budget. Warmdown over the last 25%, to 10% of peak.
+warmup_ratio: 0.01
+warmdown_ratio: 0.25
+warmdown_final_ratio: 0.1
+
+# — Validation & Checkpointing —
+# Every 250 steps: denser than the external runs' 500, which keeps the
+# equal-loss crossing estimates in plot_token_gap.py from jumping between
+# widely spaced validation points. ~1.5% of runtime.
+val_loss_every: 250
+val_tokens: 5242880
+
+# — Weights & Biases logging —
+wandb_project_name: gpt-train
+wandb_job_name: null
+no_wandb: false
+
+# — Distributed training —
+dp_size: null      # data‐parallel size
+fs_size: null      # FSDP size
+
+# — Miscellaneous flags —
+debug: false
+no_compile: false
+no_triton: false
+
+# — Optimizer & Hyperparameters —
+# Polar Express + Gram Newton-Schulz for every arm, baseline included: leaving
+# NorMuon on Triton Newton-Schulz confounds the comparison.
+optimizer: normuon
+scalar_opt: adamw
+adjust_lr: spectral_norm
+lr: 0.01
+mu: 0.95
+muon_beta2: 0.95
+nesterov: false
+weight_decay: 0.01
+use_polar_express: true
+use_gram_newton_schulz: true
