@@ -73,3 +73,24 @@ def test_save_names_match_what_resume_looks_for():
     step = 6102
     assert f"checkpoint-{step}" == "checkpoint-6102"
     assert parse_checkpoint_steps(str(step)) == (6102,)
+
+
+# ---------------------------------------------------------------- wandb identity
+
+
+import pytest as _pytest  # noqa: E402  (kept next to the tests that use it)
+
+from train import select_wandb_id  # noqa: E402
+
+
+@_pytest.mark.parametrize(
+    "stored, fresh, expected",
+    [
+        ("abc123", False, ("abc123", "must")),   # a plain resume continues the run
+        ("abc123", True, (None, "never")),       # a branch gets its own run
+        (None, False, (None, "never")),          # a fresh start
+        (None, True, (None, "never")),
+    ],
+)
+def test_select_wandb_id(stored, fresh, expected):
+    assert select_wandb_id(stored, fresh) == expected
