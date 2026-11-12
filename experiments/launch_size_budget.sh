@@ -29,7 +29,10 @@
 #   ./launch_size_budget.sh                 # 6 parents/probes + 16 branches
 #   SKIP_PROBES=1 ./launch_size_budget.sh   # no lr probes
 #   SKIP_BRANCHES=1 ./launch_size_budget.sh # parents only, branch later
+#   MODELS=418m OPTIMIZERS="muon dion2" PARENTS="muon=22824436 dion2=22824444" \
+#       SKIP_PROBES=1 ./launch_size_budget.sh   # branch existing parents only
 #   MODELS=225m ./launch_size_budget.sh     # one size
+#   OPTIMIZERS="muon dion2" ./launch_size_budget.sh  # other optimizers
 #   ./launch_size_budget.sh --seed 1        # extra args go to every run
 #
 # Branches are submitted immediately with --dependency=afterok on their parent,
@@ -52,20 +55,26 @@ fi
 RUN_ROOT="${RUN_ROOT:-$(sed -n 's/^RUN_ROOT="\${RUN_ROOT:-\(.*\)}"$/\1/p' submit_train.slurm)}"
 
 MODELS="${MODELS:-225m 418m}"
+OPTIMIZERS="${OPTIMIZERS:-normuon dion3}"
 BUDGETS=("1p25b:1788:2384" "2p5b:3576:4768" "5b:7153:9537" "10b:14305:19073")
 declare -A CONFIG=([225m]="configs/normuon_225m.yaml" [418m]="configs/normuon_418m_20b.yaml")
 declare -A PARENT_TIME=([225m]="20:00:00" [418m]="40:00:00")
 declare -A BRANCH_TIME=([225m]="04:00:00" [418m]="08:00:00")
 FRACTION=0.125
 
-# dion3 only; the configs already turn on Polar Express + GNS for both arms.
-dion_flags() { [[ "$1" == dion3 ]] && echo "--ortho_fraction $FRACTION"; }
+# dion2/dion3 only; the configs already turn on Polar Express + GNS for every arm.
+dion_flags() { [[ "$1" == dion[23] ]] && echo "--ortho_fraction $FRACTION"; }
 
-submit() {  # submit <jobname> <time> <tags> <args...>; echoes the job id
+# Anything sbatch itself must see (--dependency) goes here, not in the train
+# args: everything after submit_train.slurm is forwarded to train.py, which
+# aborts on flags it does not know.
+SBATCH_OPTS=()
+
+submit() {  # submit <jobname> <time> <tags> <train args...>; echoes the job id
     local name="$1" time="$2" tags="$3"; shift 3
     local id
     id=$(WANDB_TAGS="$tags" sbatch --parsable \
-        --job-name="$name" --time="$time" \
+        --job-name="$name" --time="$time" "${SBATCH_OPTS[@]}" \
         submit_train.slurm --data_dir "$DATA_DIR" "$@" | tail -1)
     echo "${id%%;*}"   # --parsable prints "jobid" or "jobid;cluster"
 }
@@ -84,6 +93,7 @@ launch_parent() {  # launch_parent <model> <optimizer> <lr> <role> <extra args..
 launch_branches() {  # launch_branches <model> <optimizer> <lr> <parent job id>
     local model="$1" opt="$2" lr="$3" parent="$4"
     local ckpt="$RUN_ROOT/checkpoints/${opt}_${model}-${parent}"
+    SBATCH_OPTS=(--dependency="afterok:$parent")
     for spec in "${BUDGETS[@]}"; do
         IFS=: read -r label branch total <<<"$spec"
         local id
@@ -93,7 +103,6 @@ launch_branches() {  # launch_branches <model> <optimizer> <lr> <parent job id>
         # resuming it would overwrite the parent's curve from the branch on.
         id=$(submit "${opt}_${model}_${label}" "${BRANCH_TIME[$model]}" \
             "$opt,$model,${label}-tokens,size-budget,f$FRACTION,lr$lr,branch" \
-            --dependency="afterok:$parent" \
             --config "${CONFIG[$model]}" --optimizer "$opt" --lr "$lr" \
             --num_iterations "$total" --checkpoint_freq 0 --fresh_wandb_run \
             `# warmup_ratio applies to the branch's own num_iterations, but the` \
@@ -102,11 +111,15 @@ launch_branches() {  # launch_branches <model> <optimizer> <lr> <parent job id>
             $(dion_flags "$opt") "${@:5}")
         echo "    branch $label (resume $branch -> $total steps): job $id" >&2
     done
+    SBATCH_OPTS=()
 }
 
 for model in $MODELS; do
-    for opt in normuon dion3; do
-        parent=$(launch_parent "$model" "$opt" 0.01 parent "$@" | tail -1)
+    for opt in $OPTIMIZERS; do
+        # PARENTS="opt=jobid ..." reuses a parent already submitted for this
+        # optimizer (one MODELS entry only) and launches just its branches.
+        parent=$(sed -n "s/.*\b$opt=\([0-9]*\).*/\1/p" <<<"${PARENTS:-}")
+        [[ -n "$parent" ]] || parent=$(launch_parent "$model" "$opt" 0.01 parent "$@" | tail -1)
         [[ -n "${SKIP_BRANCHES:-}" ]] || launch_branches "$model" "$opt" 0.01 "$parent" "$@"
     done
 done
