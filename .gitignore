@@ -10,3 +10,5 @@ submit.ipynb
 aztool/
 dion.egg-info/
 .vscode/
+results/
+slurm_logs/
