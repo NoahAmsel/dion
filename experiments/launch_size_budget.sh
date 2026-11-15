@@ -33,6 +33,8 @@
 #       SKIP_PROBES=1 ./launch_size_budget.sh   # branch existing parents only
 #   MODELS=225m ./launch_size_budget.sh     # one size
 #   OPTIMIZERS="muon dion2" ./launch_size_budget.sh  # other optimizers
+#   MODELS=418m OPTIMIZERS=dion LR=0.025 PARENT_WALLTIME=48:00:00 SKIP_PROBES=1 \
+#       ./launch_size_budget.sh             # Dion f=1/8 at its own lr (dion1.sh)
 #   ./launch_size_budget.sh --seed 1        # extra args go to every run
 #
 # Branches are submitted immediately with --dependency=afterok on their parent,
@@ -56,14 +58,20 @@ RUN_ROOT="${RUN_ROOT:-$(sed -n 's/^RUN_ROOT="\${RUN_ROOT:-\(.*\)}"$/\1/p' submit
 
 MODELS="${MODELS:-225m 418m}"
 OPTIMIZERS="${OPTIMIZERS:-normuon dion3}"
+# Peak lr for parents and branches. 0.01 is the tuned value for every
+# optimizer above; Dion at f=1/8 wants ~0.02-0.028 (experiments/dion1.sh).
+LR="${LR:-0.01}"
 BUDGETS=("1p25b:1788:2384" "2p5b:3576:4768" "5b:7153:9537" "10b:14305:19073")
 declare -A CONFIG=([225m]="configs/normuon_225m.yaml" [418m]="configs/normuon_418m_20b.yaml")
 declare -A PARENT_TIME=([225m]="20:00:00" [418m]="40:00:00")
+# Override for every model, e.g. for a slower optimizer.
+if [[ -n "${PARENT_WALLTIME:-}" ]]; then for m in "${!PARENT_TIME[@]}"; do PARENT_TIME[$m]=$PARENT_WALLTIME; done; fi
 declare -A BRANCH_TIME=([225m]="04:00:00" [418m]="08:00:00")
 FRACTION=0.125
 
-# dion2/dion3 only; the configs already turn on Polar Express + GNS for every arm.
-dion_flags() { [[ "$1" == dion[23] ]] && echo "--ortho_fraction $FRACTION"; }
+# dion/dion2/dion3 only (the config sets no fraction, so they would fall back to
+# train.py's 0.25); the configs already turn on Polar Express + GNS for every arm.
+dion_flags() { [[ "$1" == dion || "$1" == dion[23] ]] && echo "--ortho_fraction $FRACTION"; }
 
 # Anything sbatch itself must see (--dependency) goes here, not in the train
 # args: everything after submit_train.slurm is forwarded to train.py, which
@@ -119,8 +127,8 @@ for model in $MODELS; do
         # PARENTS="opt=jobid ..." reuses a parent already submitted for this
         # optimizer (one MODELS entry only) and launches just its branches.
         parent=$(sed -n "s/.*\b$opt=\([0-9]*\).*/\1/p" <<<"${PARENTS:-}")
-        [[ -n "$parent" ]] || parent=$(launch_parent "$model" "$opt" 0.01 parent "$@" | tail -1)
-        [[ -n "${SKIP_BRANCHES:-}" ]] || launch_branches "$model" "$opt" 0.01 "$parent" "$@"
+        [[ -n "$parent" ]] || parent=$(launch_parent "$model" "$opt" "$LR" parent "$@" | tail -1)
+        [[ -n "${SKIP_BRANCHES:-}" ]] || launch_branches "$model" "$opt" "$LR" "$parent" "$@"
     done
 done
 

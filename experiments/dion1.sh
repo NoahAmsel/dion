@@ -47,7 +47,15 @@
 # measured mu at lr 0.01: 0.9 +0.020, 0.98 -0.0035 against 0.95. If that holds
 # at the right lr, 0.98 is a real gain and 0.9 a real loss.
 #
-# mu. In Dion, as in Dion2/Dion3, mu is an error-feedback decay: M += G, then
+# STAGE 3 (jobs 22948617, 22948619), final val_loss at lr 0.028:
+#   mu     0.9     0.95    0.98
+#   loss   3.3229  3.3230  3.3468
+# It did not hold: 0.9 ties 0.95 and 0.98 costs +0.024, the reverse of stage 1.
+# mu and lr interact -- at the too-low lr 0.01 a higher mu partly made up for
+# it -- so stage 1's mu ranking was an lr artifact. The tuned picture matches
+# Muon/NorMuon's (0.9 ~ 0.95, 0.98 clearly worse): keep mu 0.95.
+#
+# In Dion, as in Dion2/Dion3, mu is an error-feedback decay: M += G, then
 # only the part of M captured this step (span of P for Dion, the selected rows
 # for Dion2/Dion3) is scaled by mu; the residual carries over undecayed. At
 # f=1/8 most directions are not captured on a given step, so momentum already
